@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="%LANG%">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Rag</title>
+    <style>
+        .highlight {
+            background-color: yellow;
+            margin: 0px 3px; /* Add margin to separate adjacent highlights */
+        }
+
+        /* カスタム右クリックメニューのスタイル */
+        #custom-menu {
+            display: none;
+            position: absolute;
+            background-color: white;
+            border: 1px solid #ccc;
+            box-shadow: 0px 2px 5px rgba(0, 0, 0, 0.2);
+            z-index: 1000;
+        }
+
+        #custom-menu ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        #custom-menu ul li {
+            padding: 5px;
+            cursor: pointer;
+        }
+
+        #custom-menu ul li:hover {
+            background-color: #eee;
+        }
+    </style>
+</head>
+<body>
+    <div class="content"><p>第13章RAG</p>
+<p>大量のテキストデータを用いて訓練された LLM は、学習データに出現する実世界の知識をモデルのパラメータの中に保持しています。<br>しかし、LLM がパラメータに保持できる知識には限りがあるため、推論時にモデルにとって未知の知識を必要とする質問が入力されたときに、LLM は適切な回答を出力できないという問題があります。<br>本章では、LLM を情報検索と組み合わせて用いることでより良い出力を得られるようにする RAG と呼ばれる手法について解説します。</p>
+<p>!pip install transformers[torch,sentencepiece]</p>
+<p>13.1 RAG とは</p>
+<p>本節では RAG について概説します。<br>はじめに、LLM が保持する実世界の知識を試す簡単な実験を行い、LLM で知識を扱う上での課題と RAG の必要性について検討します。<br>次に、RAGの概要と基本的なシステム構成について説明した後、RAG によって解決が期待される LLM の課題について解説します。</p>
+<p>13.1.1 RAG の必要性</p>
+<p>ChatGPT に代表される、非常に多くのモデルパラメータを持つ LLM は、ユーザが入力する質問に対して流暢な応答が行えるだけでなく、実世界の事物に関する質問に回答することも可能です。<br>LLM の学習データとして用いられる大量のテキストには、実世界の人や物や出来事に関する情報も多く含まれているため、LLM は学習データから自然言語の知識を学習すると同時に、データ中に単語の系列として現れる実世界の知識もモデルパラメータの重みと</p>
+<p>して記憶していると考えられます。</p>
+<p>実 世 界 の 知 識 を 必 要 と す る 質 問 に LLM が 正 し く 回 答 で き る か を 実 験 し て み ま し ょう 。<br>こ こ で は 、11.2 節 で 構 築 し た 指 示 チ ュ ー ニ ン グ 済 み の モ デ ル で あ る llm-book/</p>
+<p>121</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>Swallow-7b-hf-oasst1-21k-ja1を使って実験します。<br>なお、本節のコードは Colab で無料で提供される T4 GPU で動作します。</p>
+<p>はじめに、必要なパッケージをインストールします。</p>
+<p>In[1]: !pip install transformers[torch,sentencepiece]</p>
+<p>実験結果を再現しやすくするために、乱数のシードを固定しておきます。</p>
+<p>In[2]: from transformers.trainer_utils import set_seed</p>
+<p># 乱数のシードを設定<br>set_seed(42)</p>
+<p>次に、Swallow-7b-hf-oasst1-21k-ja のモデルを読み込み、テキスト生成を行うパイ</p>
+<p>プラインを作成します。</p>
+<p>In[3]: import torch</p>
+<p>from transformers import (</p>
+<p>AutoModelForCausalLM,<br>AutoTokenizer,<br>pipelines,</p>
+<p>)</p>
+<p># Hugging Face Hub におけるモデル名を指定<br>model_name = "llm-book/Swallow-7b-hf-oasst1-21k-ja"</p>
+<p># モデルを読み込む<br>model = AutoModelForCausalLM.from_pretrained(</p>
+<p>model_name, torch_dtype=torch.bfloat16, device_map="auto"</p>
+<p>)</p>
+<p># トークナイザを読み込む<br>tokenizer = AutoTokenizer.from_pretrained(model_name)</p>
+<p># テキスト生成用のパラメータを指定<br>generation_config = {</p>
+<p>"max_new_tokens": 128,<br>"do_sample": False,<br>"temperature": None,<br>"top_p": None,</p>
+<p>}</p>
+<p>122</p>
+<p>1 https://huggingface.co/llm-book/Swallow-7b-hf-oasst1-21k-ja</p>
+<p># テキスト生成を行うパイプラインを作成<br>text_generation_pipeline = pipeline(</p>
+<p>"text-generation",<br>model=model,<br>tokenizer=tokenizer,<br>device_map="auto",<br>**generation_config,</p>
+<p>)</p>
+<p>13・1</p>
+<p>RAGとは</p>
+<p>作成したパイプラインを用いて、任意の質問に対してモデルの回答を生成する関数を定義</p>
+<p>し、簡単な質問に対して実行してみます。</p>
+<p>In[4]: def generate_answer(query_text: str) -> str:</p>
+<p>"""質問に対してモデルが生成する回答を返す関数"""</p>
+<p># モデルに入力する会話データ<br>messages = [{"role": "user", "content": query_text}]</p>
+<p># モデルに会話データを入力し、出力会話データからモデルの回答部分を抽出<br>pipeline_output = text_generation_pipeline(messages)<br>output_messages = pipeline_output[0]["generated_text"]<br>response_text = output_messages[-1]["content"]</p>
+<p>return response_text</p>
+<p>print(generate_answer("日本で一番高い山は？ "))</p>
+<p>Out[4]: 日本で一番高い山は富士山で、標高は 3,776 メートルです。</p>
+<p>モデルの回答として、日本で一番高い山は「富士山」であるという正しい内容が生成されました。<br>どうやら、この LLM は日本で最も高い山が何であるかについて正しい知識を保持しているようです。</p>
+<p>今度は、より知名度の低い知識として「四国地方で一番高い山」について質問してみます。</p>
+<p>In[5]: print(generate_answer("四国地方で一番高い山は？ "))</p>
+<p>Out[5]: 日本の四国地方で最も高い山は、徳島県と高知県の県境に位置する剣山（つるぎさん、</p>
+<p>(cid:2)→</p>
+<p>1,955m）である。<br>剣山は四国の最高峰であり、日本の百名山のひとつである。</p>
+<p>モデルの回答としてもっともらしい文章が生成されましたが、実際に四国地方で一番高い山は愛媛県にある石(cid:7745)山（標高 1,982 メートル）なので、残念ながらこの回答は誤っています。<br>LLM は非常に多くのパラメータを持ち、大量のテキストを用いて訓練されていますが、モ</p>
+<p>デルのパラメータと学習データはどちらも有限である以上、LLM に実世界のあらゆる知識を 123</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>記憶させることは不可能です。<br>ゆえに、LLM は「四国で一番高い山」のようなモデルにとって未知の知識を要求されたときに、事実に基づかない内容の回答を無理やり生成してしまうことがあります。<br>これはいわゆる幻覚（4.3.2 節）と呼ばれる現象で、LLM の大きな課題の一つです。</p>
+<p>他方、百科事典や一般のウェブサイトに載っているような有名な事物ではなく、ユーザである個人や企業が独自に持つデータに対して LLM を適用したいといったケースにおいても、LLM は学習データに現れない情報を知識として保持できないので、一般的なテキストで訓練された LLM からユーザが望む出力を得ることはできません。<br>これは、例えば LLM を応用して企業独自のマニュアルや資料を扱う社内向けのチャットボットを開発したいときなどに問</p>
+<p>題となります。</p>
+<p>一度訓練した LLM に新たな知識を覚えさせるための方法として、新しい学習データを使ってモデルを追加訓練（ファインチューニング）するという方法も考えられます。<br>しかし、一般に LLM の訓練には大規模な計算機環境が必要になるため、大抵の場合は現実的な選択肢とはなりません。<br>また、第 11 章で解説した指示チューニングは、訓練済みの LLM を指示に追従させることはできても、新たな知識を追加で覚えさせることは困難であることが報告されています [17]。</p>
+<p>13.1.2 RAG の基本的なシステム構成前述の LLM の課題に対処する方法として、RAG（Retrieval-Augmented Generation, 検索拡張生成）2と呼ばれる手法があります。<br>RAG は、LLM を情報検索の技術と組み合わせて利用することで、より正確で制御しやすい出力を得ることを目的とした、LLM の拡張を行う手法です。</p>
+<p>図 13.1 に、通常の LLM 単体による推論と基本的な構成の RAG による推論の流れを示します。<br>RAG では、通常の LLM に検索器（retriever）の要素が加わります。<br>検索器は、ユーザが入力する質問をクエリとして外部の知識源を検索し、検索結果として取得された関連度の高いいくつかの文書を、元の質問とともに LLM に入力として渡します。<br>LLM は、検索された文書の内容を追加情報として利用して、質問の回答を生成します。</p>
+<p>典型的な検索器は、外部の知識源の文書の集まりであるデータストア（datastore）と、データストアの文書を検索可能なデータ構造で表現したインデックス（index）を構成要素として持ちます。<br>データストアには、RAG の目的に応じて必要な知識源を用意します。<br>例えば、一般的な質問応答タスク向けの RAG では、データストアとして Wikipedia のすべての記事の本文データを用いることがよくあります。<br>あるいは、会社の社内システム向けの RAG では、検索対象のデータとして企業が保持する各種文書をデータストアに格納することが考え</p>
+<p>られます。<br>インデックスは、検索器が使用する検索アルゴリズムに適した種類のものを構築します。<br>例えば、検索器が従来型の全文検索を行うものであれば、TF-IDF や BM25 [32] のよ</p>
+<p>2 RAG という名称は、論文 [28] における手法名としても知られていますが、現在では LLM と情報検索を併用したア</p>
+<p>プローチ全般を指す呼称として使われることが多くなっています。</p>
+<p>124</p>
+<p>(cid:40287)(cid:16763)(cid:1505)(cid:45)(cid:45)(cid:46)(cid:11681)(cid:9966)(cid:1502)(cid:1531)(cid:1534)(cid:19167)(cid:37980)</p>
+<p>質問</p>
+<p>(cid:45)(cid:45)(cid:46)</p>
+<p>回答</p>
+<p>(cid:13561)(cid:20758)(cid:27699)(cid:1501)(cid:21878)(cid:18519)(cid:1505)(cid:51)(cid:34)(cid:40)(cid:1502)(cid:1531)(cid:1534)(cid:19167)(cid:37980)</p>
+<p>質問</p>
+<p>検索器</p>
+<p>データストア</p>
+<p>インデックス</p>
+<p>文書1(cid:124)</p>
+<p>文書n</p>
+<p>検索された文書</p>
+<p>(cid:45)(cid:45)(cid:46)</p>
+<p>回答</p>
+<p>図 13.1: LLM による推論と RAG による推論</p>
+<p>うな、文書における単語の出現頻度をスコア付けする全文検索用のインデックスを構築します。<br>または、検索器が文埋め込み（第 8 章を参照）によるベクトルの類似度に基づく検索を行うものであれば、文書の文埋め込みベクトルを格納したインデックス（ベクトルインデッ</p>
+<p>クス）を構築します。</p>
+<p>RAG の手法は、2020 年頃から現在までさまざまなものが提案されていますが、そのほとんどは図 13.1 のシステム構成を基本としています。<br>第 9 章では、文書検索モデル BPR [55] を質問応答のデータセットで訓練し、ChatGPT と組み合わせることで質問応答システムを構築しましたが、これも RAG の基本構成に沿ったシステムです。<br>最近では、高性能な LLM や文埋め込みモデルが多く公開されるようになったため、検索器に用いるモデルを自分で訓練したり、ChatGPT などの商用 LLM を使わなくとも、公開されている LLM や文埋め込みモデルをそのまま用いるだけで、実用的な性能の RAG のシステムを構築することが可能になってきています。<br>次節では、第 11 章で構築した指示チューニング済み LLM と公開されている文埋め込みモデルを使用した RAG のシステムを、オープンソースのライブラリを利用して構築します。</p>
+<p>13.1.3 RAG が解決を目指す LLM の五つの課題</p>
+<p>通常の LLM は、自然言語の知識や実世界の知識をモデルのパラメータに保持しますが、先述の通り、この方法には複数の課題があります。<br>RAG は、LLM のそれらの課題に対する解決策となり得るものです。<br>以下に、Asai らの論文 [2] で主張されている、通常の LLM に存在する五つの課題と、それらに対して RAG が提供する解決可能性について説明します。</p>
+<p>13・1</p>
+<p>RAGとは</p>
+<p>125</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>○課題 1. LLM が事実に基づかない出力をしてしまう</p>
+<p>LLM は、すべての知識をモデルパラメータの中に保持しますが、モデルが保持できる知識量には限界があります。<br>そのため、モデルが保持していない知識について質問されると、LLM は事実に基づかない内容の回答を生成してしまうことがあります。<br>この問題は、より低頻度の知識（学習データに出現する回数が少ない知識）でより顕著となります。</p>
+<p>RAG では、LLM は外部の知識源から検索された文書を参照しながら質問の回答を出力することができます。<br>これにより、LLM が学習した知識だけを頼りに回答を出力する場合よりも高い確率で、事実に基づいた出力を得られることが期待できます。</p>
+<p>○課題 2. LLM の出力の根拠を調べるのが困難</p>
+<p>通常の LLM は、モデルパラメータに保存された知識をもとに出力を生成するため、LLM の出力がどんな情報を根拠として生成されたものであるかを人間が知ることは困難です。<br>とりわけ、ChatGPT などの商用 LLM は学習データが非公開であるため、LLM が出力した内容の元となったであろう学習データの事例を特定することは不可能です。</p>
+<p>RAG では、LLM が出力を生成するときに直接用いた情報として、検索された文書の内容をそのままユーザに提示することが可能なので、LLM が出力した内容の正しさを検証することが容易になり、LLM を用いたアプリケーションの透明性を向上できます。</p>
+<p>○課題 3. LLM が学習する情報の制御が困難</p>
+<p>LLM の学習データに個人情報や権利上問題があるデータなどが意図せず含まれていると、それらの望ましくない情報が LLM の出力に含まれてしまう危険性があります。<br>一般的に、一度訓練した LLM から特定の情報だけを忘れさせることは非常に困難です3。<br>また、LLM の再学習のために学習データから問題がありそうな事例を取り除こうとしても、前述の「LLM の出力の根拠を調べるのが困難」という課題により、学習データのどの事例が望ましくない出</p>
+<p>力の元となったかを突き止めることは難しいです。</p>
+<p>RAG では、LLM の出力に望ましくない情報が含まれていた場合、それが外部の知識源に由来するものかどうかを容易に検証できるため、問題の切り分けがしやすくなります。<br>もし外</p>
+<p>部の知識源に問題があった場合には、データストア内の文書を修正・更新するだけで、モデ</p>
+<p>ルの再訓練などを伴わずに問題の解決が可能になります。</p>
+<p>○課題 4. より新しい情報や異分野のデータへの適応が困難</p>
+<p>当たり前ですが、LLM の学習データには、データ作成時点までの情報しか含まれていません。<br>そのため、たとえ LLM が学習データの知識をすべて保持できたとしても、学習データ作成時点以降に生まれた新しい知識を扱うことはできません。<br>すなわち、LLM 単体では時事的な話題に追従することが困難です。</p>
+<p>また、情報の新しさとは別の観点として、LLM の知識を特定の専門分野に適応させたいというケースや、ユーザが独自に所有するデータに LLM を適用したいというケースも考えられ</p>
+<p>3 言語モデルから特定の知識を削除したり編集したりすることは machine unlearning や knowledge editing などと</p>
+<p>126</p>
+<p>呼ばれ、研究が進められています。</p>
+<p>ます。<br>しかし、公開されている訓練済み LLM のほとんどは、分野を限定しない一般的なテキストで訓練されたものであるため、特定の専門分野のテキストに対して十分な性能を持たせ</p>
+<p>るためには、モデルの追加訓練が必要になります。</p>
+<p>これに対して、RAG は検索対象である外部の知識源を差し替えるだけで、LLM の再訓練や追加訓練を伴わずに、LLM が扱える知識をアップデートできます。<br>また、RAG は LLM の学習データとは異なる分野の知識を用いた場合にも高い性能を示すことが報告されています[35]。</p>
+<p>○課題 5. 知識を扱うために大規模なモデルが必要</p>
+<p>LLM は、モデルのパラメータ数と学習データの量が大きければ大きいほど良い性能を示すというスケール則（4.1 節）が知られています。<br>すなわち、LLM により多くの知識を学習させるためには、学習データの量を増やすと同時に、モデルのパラメータ数を大きくしていく必要があります。<br>LLM が良い性能を発揮するには数十億〜数百億のモデルパラメータが必要になりますが、この規模のモデルを訓練するためには、複数の GPU マシンなどからなる大規模な計算機環境が必要になります。<br>また、訓練済みの LLM で推論するときも、モデルのパラメータ数が多ければ多いほど、より大規模な計算機環境が必要になります。</p>
+<p>RAG では、LLM の外部に知識源を用意することで、LLM にすべての知識を覚えさせる必要</p>
+<p>がなくなるので、モデルのパラメータ数は比較的小さくすることができます。</p>
+<p>13・2</p>
+<p>基本的なRAGのシステムの実装</p>
+<p>13.2 基本的な RAG のシステムの実装</p>
+<p>ここからは、前節で紹介した基本的な構成の RAG のシステムを実装します。<br>Hugging FaceHub で公開されている指示チューニング済みの LLM と文埋め込みモデルを利用した RAG のシステムを、LangChain というライブラリを活用して実装します。</p>
+<p>13.2.1 LangChain とはLangChain4は、LLM を使用したアプリケーションを構築するためのオープンソースのフレームワークです。<br>LangChain は、2022 年 10 月のプロジェクト立ち上げ以降、非常に活発に開発が進められており、GitHub では本書執筆時点で約 9 万の Star が付くなど、最も広く利用されている LLM アプリケーション構築用フレームワークの一つとなっています。</p>
+<p>LangChain では、LLM、文埋め込みモデル、検索器といった各種の要素がコンポーネント（component）として抽象化されて提供されています。<br>LangChain のユーザはこれらのコンポーネントを組み合わせて RAG やエージェント5といった LLM を活用したアプリケーション</p>
+<p>4 https://www.langchain.com/5 エージェントとは、LLM が外部ツールと連携して自律的に処理を実行するシステムのことを指します。</p>
+<p>127</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>を構築することができます。</p>
+<p>LangChain の各コンポーネントには、多くの外部ライブラリやサービスとの連携機能（integration）が用意されており、対応する Python のクラスを通じて利用することができます6。<br>例えば、LLM のコンポーネントとして、OpenAI や Google などの各社が提供するモデルを API を通じて利用するためのクラスや、Hugging Face Hub に登録されているモデルをダウンロードしてローカル環境で実行するためのクラスなどが用意されています。<br>また、外部知識のデータストアとしては、ローカル環境に保存されたテキストデータや PDF データを直接読み込んで扱うためのクラスや、各種クラウドストレージやデータベースに接続して利用</p>
+<p>するクラスなど、データの形式や保管場所に応じたものが用意されています。<br>これらのクラスはコンポーネントごとに共通のインターフェースで利用できるため、LangChain のユーザはライブラリやサービスの違いを気にすることなく、コンポーネントを組み合わせること</p>
+<p>でアプリケーションを開発できます。</p>
+<p>13.2.2 LangChain で LLM と文埋め込みモデルを使うここからは、実際に LangChain を使って、Hugging Face Hub で公開されている LLM と文</p>
+<p>埋め込みモデルを利用した RAG のシステムを構築してみます。</p>
+<p>本節のコードの内容は単一の事例を中心とした動作確認であり、計算時間のかかる学習や</p>
+<p>評価は行いません。<br>Colab で無料で提供される T4 GPU で動作可能です。</p>
+<p>○環境の準備</p>
+<p>は じ め に 、必 要 な パ ッ ケ ー ジ を イ ン ス ト ー ル し ま す 。<br>LangChain の Python パ ッケ ー ジ は 機 能 ご と に い く つ か の パ ッ ケ ー ジ に 分 か れ て お り 、実 装 し た い ア プ リ ケ ーシ ョ ン で 必 要 と な る パ ッ ケ ー ジ を そ れ ぞ れ イ ン ス ト ー ル す る 必 要 が あ り ま す7。<br>こ こで は 、LangChain の 基 本 機 能 を 提 供 す る langchain に 加 え て 、主 要 な 外 部 ラ イ ブ ラリとの連携機能を提供する langchain-community と Hugging Face Hub との連携機能を 提 供 す る langchain-huggingface を イ ン ス ト ー ル し ま す 。<br>ま た 、本節 で 使 用 す るlangchain-community の連携機能に必要なパッケージとして faiss-cpu と jq もインストールします。</p>
+<p>In[1]: !pip install transformers[torch,sentencepiece] langchain</p>
+<p>(cid:2)→</p>
+<p>langchain-community langchain-huggingface faiss-cpu jq</p>
+<p>なお、本書のコードでは下記のバージョンの LangChain のパッケージを使用しています。<br>将来の LangChain のアップグレードにより本書のコードが動作しなくなった場合は、下記のバージョンを指定したパッケージのインストールを試してみてください。</p>
+<p>6 連携機能の一覧については、LangChain の公式ドキュメントを参照してください。<br>7 LangChain の Python パッケージについて詳しくは、公式ドキュメントにおけるインストール方法のページを参</p>
+<p>128</p>
+<p>照してください。</p>
+<p>●langchain: 0.2.12●langchain-community: 0.2.11●langchain-huggingface: 0.0.3</p>
+<p>本節のコードを実行するには、LangChain の Hugging Face 連携を使用するために、Hug-ging Face Hub にログインした状態である必要があります。<br>次のコードを実行して、HuggingFace Hub にログインしてください。</p>
+<p>In[2]: from huggingface_hub import notebook_login</p>
+<p>notebook_login()</p>
+<p>実験結果を再現しやすくするために、乱数のシードを固定しておきます。</p>
+<p>In[3]: from transformers.trainer_utils import set_seed</p>
+<p># 乱数のシードを設定<br>set_seed(42)</p>
+<p>○LangChain で LLM を使う</p>
+<p>LangChain による RAG の構築を始める前に、LangChain で Hugging Face Hub にある LLM</p>
+<p>を使用するための方法について説明します。</p>
+<p>LangChain で LLM を扱うには LLM コンポーネントを使用します。<br>LangChain では、OpenAI や Google などの各社が提供するモデルを LLM コンポーネントとして利用するための連携機能が数多く用意されています。<br>Hugging Face Hub に登録されているモデルを使用するための連携機能も用意されており、langchain-huggingface の Python パッケージを通じて利用できます。</p>
+<p>それでは、LangChain の LLM コンポーネントを作成してみましょう。<br>Hugging Face Hubのモデルを用いて LLM コンポーネントを作成するには、langchain-huggingface パッケージの HuggingFacePipeline クラスを用います。<br>このクラスは、transformers ライブラリの pipeline（1.1 節）を読み込み、それを LangChain の LLM コンポーネントとして使用可能にするものです。<br>ここでは LLM として、前節と同じく 11.2 節で構築した指示チューニング済みモデルの llm-book/Swallow-7b-hf-oasst1-21k-ja を読み込んで使用します。</p>
+<p>In[4]: import torch</p>
+<p>from langchain_huggingface import HuggingFacePipeline<br>from transformers import (</p>
+<p>AutoModelForCausalLM,<br>AutoTokenizer,<br>pipeline,</p>
+<p>13・2</p>
+<p>基本的なRAGのシステムの実装</p>
+<p>129</p>
+<p>)</p>
+<p># Hugging Face Hub におけるモデル名を指定<br>model_name = "llm-book/Swallow-7b-hf-oasst1-21k-ja"</p>
+<p># モデルを読み込む<br>model = AutoModelForCausalLM.from_pretrained(</p>
+<p>model_name,<br>torch_dtype=torch.bfloat16,<br>device_map="auto",</p>
+<p>)</p>
+<p># トークナイザを読み込む<br>tokenizer = AutoTokenizer.from_pretrained(model_name)</p>
+<p># テキスト生成用のパラメータを指定<br>generation_config = {</p>
+<p>"max_new_tokens": 128,<br>"do_sample": False,<br>"temperature": None,<br>"top_p": None,</p>
+<p>}</p>
+<p># テキスト生成を行うパイプラインを作成<br>text_generation_pipeline = pipeline(</p>
+<p>"text-generation",<br>model=model,<br>tokenizer=tokenizer,<br>device_map="auto",<br>**generation_config,</p>
+<p>)</p>
+<p># パイプラインから LangChain の LLM コンポーネントを作成<br>llm = HuggingFacePipeline(pipeline=text_generation_pipeline)</p>
+<p>作成した LLM コンポーネントに対して、質問を入力してみましょう。<br>11.2.3 節で設定した通り、このモデルでは専用のチャットテンプレートが用いられるため、プロンプトと質問にチャットテンプレートを適用した文字列を LLM に入力する必要があります。<br>実際に入力を行う前に、質問にテンプレートが正しく適用されるかを確認します。</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>130</p>
+<p>In[5]: from pprint import pprint</p>
+<p># モデルに入力する会話データ<br>llm_prompt_messages = [</p>
+<p>{"role": "user", "content": "四国地方で一番高い山は？ "},</p>
+<p>]</p>
+<p># 会話データにチャットテンプレートを適用し、内容を確認<br>llm_prompt_text = tokenizer.apply_chat_template(</p>
+<p>llm_prompt_messages,<br>tokenize=False,<br>add_generation_prompt=True,</p>
+<p>)<br>print(llm_prompt_text)</p>
+<p>13・2</p>
+<p>基本的なRAGのシステムの実装</p>
+<p>Out[5]: <s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：</p>
+<p>LLM コンポーネントへの入力は、LLM コンポーネントの invoke メソッドを呼び出すことにより行います。<br>LangChain における実行可能な各種コンポーネント（Runnable と呼ばれます）は invoke メソッドを持っており、このメソッドを呼び出すことでコンポーネントを実行することができます。<br>Runnable と invoke メソッドはこの後にも登場するので覚えておいてください。</p>
+<p>In[6]: # LLM への入力を実行し、結果を確認</p>
+<p>llm_output_message = llm.invoke(llm_prompt_text)<br>print(llm_output_message)</p>
+<p>Out[6]: <s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：日本の四国地方で最も高い山は、徳島県と高知県の県境に位置する剣山（つるぎさん、1,955m）である。<br>剣山は四国の最高峰であり、日本の百名山のひとつである。</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>LLM コンポーネントの出力として、Swallow-7b-hf-oasst1-21k-ja のモデルの出力を得ることができました。</p>
+<p>○Chat Model コンポーネントの利用</p>
+<p>LangChain の LLM コンポーネントは、対話形式のやりとりを行わない、次トークン予測を繰り返すだけの基本的な LLM 向けに設計されています。<br>そのため、本節で扱う指示チューニング済みのモデルのような、対話形式のやりとりを行うモデルを LLM コンポーネントで扱うためには、先ほどのように、会話データ（メッセージの list）にチャットテンプレートを適用した文字列を入力する必要があり、やや面倒です。</p>
+<p>LangChain には、対話形式のやりとりを行う LLM のために用意された Chat Model コン</p>
+<p>ポーネントがあります。<br>Chat Model コンポーネントは、入力としてユーザとモデルの会話 131</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>データを受け取り、LLM の応答を出力します。<br>LLM への入力時には、モデルの種類に応じた適切なチャットテンプレートが会話データに自動で適用されます。</p>
+<p>Hugging Face Hub の モ デ ル を 用 い た Chat Model コ ン ポ ー ネ ン ト を 作 成 す る に は 、langchain-huggingface パッケージの ChatHuggingFace クラスに、先ほど作成したLLM コンポーネントとトークナイザを渡します。</p>
+<p>In[7]: from langchain_huggingface import ChatHuggingFace</p>
+<p># LLM コンポーネントから Chat Model コンポーネントを作成<br>chat_model = ChatHuggingFace(llm=llm, tokenizer=tokenizer)</p>
+<p>作成した Chat Model に、先ほど LLM コンポーネントに入力したものと同じクエリを入力してみましょう。<br>LLM コンポーネントでは、プロンプトと質問にチャットテンプレートを適用した文字列を入力する必要がありましたが、Chat Model コンポーネントは、プロンプトと質問からなる会話データをメッセージの list としてモデルに入力します。</p>
+<p>Chat Model への入力を実行する前に、Chat Model が会話データの入力に対してチャットテンプレートを適用した後の文字列を確認します。<br>ここで使用している HumanMessage とこの後に登場する AIMessage は、いずれも LangChain で会話データのメッセージを扱うためのクラスです。<br>それぞれのクラスは、transformers ライブラリの会話データにおける"role"が"user"のメッセージと"role"が"assistant"のメッセージに対応します。</p>
+<p>In[8]: from langchain_core.messages import HumanMessage, SystemMessage</p>
+<p># Chat Model に入力する会話データchat_messages = [HumanMessage(content="四国地方で一番高い山は？ ")]</p>
+<p># Chat Model によるチャットテンプレート適用後の入力文字列を確認<br>chat_prompt = chat_model._to_chat_prompt(chat_messages)<br>print(chat_prompt)</p>
+<p>Out[8]: <s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：</p>
+<p>想定通り、先ほどと同じチャットテンプレートが適用されていることがわかります。</p>
+<p>Chat Model コンポーネントも LLM コンポーネントと同様に Runnable であり、invoke メ</p>
+<p>ソッドでモデルへの入力を実行できます。</p>
+<p>In[9]: # Chat Model に会話データを入力し、出力を確認</p>
+<p>chat_output_message = chat_model.invoke(chat_messages)<br>pprint(chat_output_message)</p>
+<p>132</p>
+<p>Out[9]: AIMessage(content='<s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>日本の四国地方で最も高い山は、徳島県と高知県の県境に位置する剣山（つるぎさん、1,955m）である。<br>剣山は四国の最高峰であり、日本の百名山のひとつである。<br>', id='run-62e12026-9cda-4d2c-a962-ccee9e3df9bc-0')</p>
+<p>先ほどと同じ内容の出力が得られました。<br>ただし、LLM コンポーネントが文字列を出力したのに対し、Chat Model コンポーネントは AIMessage クラスのインスタンスを出力することに注意してください。</p>
+<p>HuggingFacePipeline が 出 力 す る 文 字 列 、お よ び ChatHuggingFace が 出 力 す るAIMessage には、モデルの応答だけでなく、入力プロンプトの文字列も含まれています。<br>このような出力からモデルの応答部分のみを取り出すには、下記のような文字列の切り</p>
+<p>出し処理を行います。</p>
+<p>In[10]: # Chat Model が出力したテキストからモデルの応答部分のみを抽出</p>
+<p>response_text = chat_output_message.content[len(chat_prompt) :]<br>print(response_text)</p>
+<p>Out[10]: 日本の四国地方で最も高い山は、徳島県と高知県の県境に位置する剣山（つるぎさん、</p>
+<p>(cid:2)→</p>
+<p>1,955m）である。<br>剣山は四国の最高峰であり、日本の百名山のひとつである。</p>
+<p>○Chain を構築する</p>
+<p>LangChain では、LLM による生成や、検索器による文書検索、任意のテキストの整形処理といった、個々の実行可能な処理（Runnable）を組み合わせて、より複雑な処理（Chain）を構築することができます。<br>LangChain では、RAG やエージェントで実行する一連の処理も Chain として実装できます。</p>
+<p>ここでは例として、以下の二つの処理を連続して行う Chain を作成します。</p>
+<p>1. 任意の文字列（query）を受け取り、Chat Model に入力するプロンプトを生成する2. プロンプトを Chat Model に入力し、モデルの応答を出力として得る</p>
+<p>作成する Chain の構成を図 13.2 に示します。<br>この図において、実線の四角形の一つひとつが Runnable であり、それらをつなぎ合わせたもの（点線で囲まれた全体）が一つの Chainです。</p>
+<p>はじめに、1 番目の処理を行う Runnable を作成します。<br>任意の引数をとるプロンプトの生成には Prompt Template コンポーネントが利用でき、Chat Model 向けの Prompt Template はChatPromptTemplate クラスを用いて作成することができます。<br>作成した Prompt Templateに、プロンプトがとる引数名とその値を持つ dict を渡して実行することで、Chat Model への入力となるプロンプトが ChatPromptValue クラスのインスタンスとして生成されます。</p>
+<p>13・2</p>
+<p>基本的なRAGのシステムの実装</p>
+<p>133</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>str</p>
+<p>query</p>
+<p>prompt_template</p>
+<p>ChatPromptValue</p>
+<p>chat_model</p>
+<p>AIMessage</p>
+<p>図 13.2: Chat Model を用いた単純な Chain の構成</p>
+<p>In[11]: from langchain_core.prompts import ChatPromptTemplate</p>
+<p># 任意の query からプロンプトを構築する Prompt Template を作成<br>prompt_template = ChatPromptTemplate.from_messages(</p>
+<p>[("user", "{query}")]</p>
+<p>)</p>
+<p># Prompt Template を実行し、結果を確認<br>prompt_template_output = prompt_template.invoke(</p>
+<p>{"query": "四国地方で一番高い山は？ "}</p>
+<p>)<br>pprint(prompt_template_output)</p>
+<p>Out[11]: ChatPromptValue(messages=[HumanMessage(content=' 四国地方で一番高い山は？</p>
+<p>(cid:2)→</p>
+<p>')])</p>
+<p>2 番目の処理である Chat Model による推論は、すでに作成した Chat Model をそのままRunnable として使用できます。<br>先ほどは Chat Model に入力する会話データとしてメッセージの list を用いましたが、ChatPromptValue も Chat Model の入力に用いることができます8。</p>
+<p>最後に、二つの Runnable を連結して、二つの処理を連続して実行する Chain を作成します。<br>LangChain では、複数の Runnable をパイプ（|）でつなげると、それらを連結した</p>
+<p>8 Chat Model にメッセージの list を入力した場合も、内部的には ChatPromptValue に変換されています。</p>
+<p>134</p>
+<p>13・2</p>
+<p>基本的なRAGのシステムの実装</p>
+<p>Chain を作成できます9。</p>
+<p>In[12]: # Prompt Template と Chat Model を連結した Chain を作成</p>
+<p>chain = prompt_template | chat_model</p>
+<p># Chain を実行し、結果を確認chain_output = chain.invoke({"query": "四国地方で一番高い山は？ "})pprint(chain_output)</p>
+<p>Out[12]: AIMessage(content='<s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>日本の四国地方で最も高い山は、徳島県と高知県の県境に位置する剣山（つるぎさん、1,955m）である。<br>剣山は四国の最高峰であり、日本の百名山のひとつである。<br>', id='run-2cbc476a-022c-46a4-81e1-1754cfd61bb4-0')</p>
+<p>Chain の実行結果として、入力した"query"の値から生成されたプロンプトを Chat Model に入力したときのモデルの出力が得られました。</p>
+<p>いま作成した Chain は、Chat Model の出力をそのまま Chain の出力としているため、出力である AIMessage にはプロンプトの内容も含まれています。<br>Chain の出力にプロンプトの内容が含まれないようにするために、二つ目の Runnable を改良してみましょう。<br>具体的には、Chat Model をそのまま Runnable として用いるのではなく、Chat Model の実行および出力からの応答部分の切り出し処理の両方を行う Runnable を新たに作成し、これを Chain の二つ目の Runnable とします。<br>LangChain の RunnableLambda クラスを用いると、任意の関数の処理を行う Runnable を作成できるので、これを利用します。</p>
+<p>In[13]: from langchain_core.prompt_values import ChatPromptValue</p>
+<p>from langchain_core.runnables import RunnableLambda</p>
+<p>def chat_model_resp_only_func(</p>
+<p>chat_prompt_value: ChatPromptValue,</p>
+<p>) -> str:</p>
+<p>"""chat_model に chat_prompt_value を入力し、出力からモデルの応答部分のみを文字列で返す"""chat_prompt = chat_model._to_chat_prompt(</p>
+<p>chat_prompt_value.messages</p>
+<p>)<br>chat_output_message = chat_model.invoke(chat_prompt_value)<br>response_text = chat_output_message.content[len(chat_prompt) :]<br>return response_text</p>
+<p>9 このような、LangChain における Runnable を組み合わせて Chain を構成する方法は、LangChain ExpressionLanguage（LCEL）として設計されています。<br>LCEL について詳しくは LangChain の公式ドキュメントを参照して</p>
+<p>ください。</p>
+<p>135</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p># 定義した関数の処理を行う Runnable を作成<br>chat_model_resp_only = RunnableLambda(chat_model_resp_only_func)</p>
+<p># Prompt Template と Runnable を連結した Chain を作成<br>chain_resp_only = prompt_template | chat_model_resp_only</p>
+<p># Chain を実行し、結果を確認<br>chain_resp_only_output = chain_resp_only.invoke(</p>
+<p>{"query": "四国地方で一番高い山は？ "}</p>
+<p>)<br>print(chain_resp_only_output)</p>
+<p>Out[13]: 日本の四国地方で最も高い山は、徳島県と高知県の県境に位置する剣山（つるぎさん、</p>
+<p>(cid:2)→</p>
+<p>1,955m）である。<br>剣山は四国の最高峰であり、日本の百名山のひとつである。</p>
+<p>Chain の出力として、Chat Model のモデルの応答部分のみの文字列が得られました。</p>
+<p>○LangChain で文埋め込みモデルを使う</p>
+<p>LangChain では、RAG などのアプリケーションで使用する文埋め込みモデルを Embed-ding Model コンポーネントとして使用できます。<br>LangChain の Hugging Face 連携には、Hugging Face Hub の文埋め込みモデルを Embedding Model コンポーネントとして使用するための機能が用意されています。<br>具体的には、langchain-huggingface パッケージのHuggingFaceEmbeddings クラスを利用します。<br>本章では文埋め込みモデルとして、BeijingAcademy of Artiﬁcial Intelligence（BAAI）が公開している、多言語の文埋め込みで性能が高いモデルの一つである BGE-M310 [7] を使用します11。<br>ここでは、文埋め込みモデルによる GPUメモリの使用量を抑えるため、モデルのデータ型として float16 を指定して読み込みます。</p>
+<p>In[14]: from langchain_huggingface.embeddings import HuggingFaceEmbeddings</p>
+<p># Hugging Face Hub におけるモデル名を指定<br>embedding_model_name = "BAAI/bge-m3"</p>
+<p># モデル名から Embedding Model を初期化<br>embedding_model = HuggingFaceEmbeddings(<br>model_name=embedding_model_name,<br>model_kwargs={"model_kwargs": {"torch_dtype": torch.float16}},</p>
+<p>)</p>
+<p>Embedding Model コンポーネントを読み込めたら、適当な二つのテキストに対して文埋め</p>
+<p>10 https://huggingface.co/BAAI/bge-m311 BGE-M3 の文埋め込みには、dense、sparse、multi-vector、およびそれらの組み合わせのバリエーションがありま</p>
+<p>136</p>
+<p>すが、ここでは簡便に利用可能な dense の文埋め込みのみを使用します。</p>
+<p>込みを実行してみましょう。</p>
+<p>In[15]: sample_texts = [</p>
+<p>"日本で一番高い山は何ですか？ ","日本で一番高い山は富士山です。<br>",</p>
+<p>]</p>
+<p># 二つのテキストに対して文埋め込みを実行し、結果を確認<br>sample_embeddings = embedding_model.embed_documents(sample_texts)<br>print(sample_embeddings)</p>
+<p>Out[15]: [[0.01058197021484375, 0.032470703125, ...（略）], [0.027557373046875,</p>
+<p>(cid:2)→</p>
+<p>0.02410888671875, ...（略）]]</p>
+<p>Embedding Model コンポーネントの出力として、文埋め込みのベクトルが float の listとして得られます。<br>ベクトル同士の類似度計算などの演算を行いたい場合は、PyTorch のTensor などに変換してから行います。</p>
+<p>In[16]: # 二つのテキストの文埋め込みから類似度を計算</p>
+<p>similarity = torch.nn.functional.cosine_similarity(</p>
+<p>torch.tensor([sample_embeddings[0]]),<br>torch.tensor([sample_embeddings[1]]),</p>
+<p>)<br>print(similarity)</p>
+<p>Out[16]: tensor([0.7743])</p>
+<p>13.2.3 LangChain で RAG を実装するここからは、LangChain で簡単な RAG のシステムを実装していきます。<br>ここまでに用いた Chat Model と Embedding Model を用いて、小規模な文書集合に対する RAG を実装します。<br>RAG によって、これまでの例で用いた「四国地方で一番高い山」のような質問に正しく答えられるようになることを目指します。</p>
+<p>○データストアの構築</p>
+<p>はじめに、RAG で検索対象とする文書集合を読み込み、データストアを構築します。<br>本書の GitHub リポジトリにて、本章の実験で使用する文書集合のファイルを用意していますので、wget コマンドでダウンロードしてください。<br>このファイルは、日本語版 Wikipedia の「日本百名山」カテゴリの記事 103 件の本文を、1 行 1 記事の JSON Lines 形式にまとめたものです。</p>
+<p>13・2</p>
+<p>基本的なRAGのシステムの実装</p>
+<p>137</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>In[17]: # 検索対象の文書集合のファイルをダウンロード</p>
+<p>!wget \<br>https://github.com/ghmagazine/llm-book/raw/main/chapter13/docs.json</p>
+<p>LangChain で文書を読み込むには Document Loader コンポーネントを使用します。<br>ここでは、JSON 形式のファイルから文書を読み込むための Document Loader である、langchain-community の JSONLoader クラスを使用します。<br>読み込みを行う各文書の内容は、JSON Lines ファイルの各行のオブジェクトの"text"フィールドに記述されているので、JSONLoader クラスの引数 jq_schema と json_lines にそれぞれ適した値を設定します。</p>
+<p>In[18]: from langchain_community.document_loaders import JSONLoader</p>
+<p># JSON ファイルから文書を読み込むための Document Loader を初期化<br>document_loader = JSONLoader(</p>
+<p>file_path="./docs.json", # 読み込みを行うファイルjq_schema=".text", # 読み込み対象のフィールドjson_lines=True, # JSON Lines 形式のファイルであることを指定</p>
+<p>)</p>
+<p># 文書の読み込みを実行<br>documents = document_loader.load()</p>
+<p># 読み込まれた文書数を確認<br>print(len(documents))</p>
+<p>Out[18]: 103</p>
+<p>読 み 込 ま れ た 文 書 の 内 容 を 確 認 し ま す 。<br>Document Loader で 読 み 込 ま れ た 文 書 は 、</p>
+<p>Document クラスのインスタンスになっています。</p>
+<p>In[19]: pprint(documents[0])</p>
+<p>Out[19]: Document(metadata={'source': '/content/docs.json', 'seq_num': 1},</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>page_content=' 富士山（ふじさん）は、静岡県（富士宮市、富士市、裾野市、御殿場市、駿東郡小山町）と山梨県（富士吉田市、南都留郡鳴沢村）に跨る活火山である。<br>標高 3776.12 m、日本最高峰（剣ヶ峰）の独立峰で、その優美な風貌は日本国外でも日本の象徴として広く知られている。<br> 数多くの芸術作品の題材とされ芸</p>
+<p>術面のみならず、気候や地層など地質学的にも社会に大きな影響を与えている。<br>懸</p>
+<p>垂曲線の山容を有した玄武岩質成層火山で構成され、その山体は駿河湾の海岸まで及ぶ。<br> 古来より霊峰とされ、...（略）')</p>
+<p>読み込まれた文書の長さ（文字数）を確認します。<br>文書の内容の文字列は Document の</p>
+<p>page_content 属性から取得できます。</p>
+<p>138</p>
+<p>In[20]: print(len(documents[0].page_content))</p>
+<p>Out[20]: 21232</p>
+<p>この事例のように、本章で扱う文書集合は、一つの文書が Wikipedia の一つの記事の全文から作成されているので、一つの文書が数万文字の長さからなるものもあります。</p>
+<p>一般に、文埋め込みモデルが扱える文書の長さ（トークン数）には上限があります。<br>ま</p>
+<p>た、長い文書を単一のベクトルに埋め込むことは検索においてあまり効果的ではありません12。<br>そこで、文埋め込みによる検索をより効率的・効果的にするために、すべての文書を短く分割する処理を行います。<br>LangChain では、文書の分割を行うための Text Splitterコンポーネントが用意されています。<br>ここでは、Text Splitter コンポーネントの一つであるRecursiveCharacterTextSplitter クラスを用いて、各文書を指定した文字数以内の長さに分割します。<br>ここでの工夫として、分割された文書の間に、ある程度の重複部分が生まれ</p>
+<p>るように分割します。<br>こうすることで、重要な内容の文のまとまりが途中で別々の文書に分</p>
+<p>断されて検索の性能が低下する可能性を減らすことができます。</p>
+<p>In[21]: from langchain_text_splitters import RecursiveCharacterTextSplitter</p>
+<p># 文書を指定した文字数で分割する Text Splitter を初期化<br>text_splitter = RecursiveCharacterTextSplitter(</p>
+<p>chunk_size=400, # 分割する最大文字数chunk_overlap=100, # 分割された文書間で重複させる最大文字数add_start_index=True, # 元の文書における開始位置の情報を付与</p>
+<p>)</p>
+<p># 文書の分割を実行<br>split_documents = text_splitter.split_documents(documents)</p>
+<p># 分割後の文書数を確認<br>print(len(split_documents))</p>
+<p>Out[21]: 1475</p>
+<p>分割後の文書の内容と長さを確認します。</p>
+<p>In[22]: # 分割後の文書の内容を確認</p>
+<p>pprint(split_documents[0])<br>pprint(split_documents[1])</p>
+<p>12 Microsoft によるブログ記事 [5] では、文書の分割の有無や分割後の文書の長さが文埋め込みによる検索結果に与え</p>
+<p>る影響について検証が行われています。</p>
+<p>13・2</p>
+<p>基本的なRAGのシステムの実装</p>
+<p>139</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>Out[22]: Document(metadata={'source': '/content/docs.json', 'seq_num': 1,</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'start_index': 0}, page_content=' 富士山（ふじさん）は、静岡県（富士宮市、富士市、裾野市、御殿場市、駿東郡小山町）と山梨県（富士吉田市、南都留郡鳴沢村）に跨る活火山である。<br>標高 3776.12 m、日本最高峰（剣ヶ峰）の独立峰で、その優美な風貌は日本国外でも日本の象徴として広く知られている。<br> 数多くの芸</p>
+<p>術作品の題材とされ芸術面のみならず、気候や地層など地質学的にも社会に大きな</p>
+<p>影響を与えている。<br>懸垂曲線の山容を有した玄武岩質成層火山で構成され、その山体は駿河湾の海岸まで及ぶ。<br>')</p>
+<p>Document(metadata={'source': '/content/docs.json', 'seq_num': 1,</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'start_index': 129}, page_content=' 数多くの芸術作品の題材とされ芸術面のみならず、気候や地層など地質学的にも社会に大きな影響を与えている。<br>懸垂曲</p>
+<p>線の山容を有した玄武岩質成層火山で構成され、その山体は駿河湾の海岸まで及ぶ。</p>
+<p>古来より霊峰とされ、特に山頂部は浅間大神が鎮座するとされたため、神聖視され</p>
+<p>た。<br>噴火を沈静化するため律令国家により浅間神社が祭祀され、浅間信仰が確立さ</p>
+<p>れた。<br>また、富士山修験道の開祖とされる富士上人により修験道の霊場としても認</p>
+<p>識されるようになり、登拝が行われるようになった。<br>これら富士信仰は時代により</p>
+<p>多様化し、村山修験や富士講といった一派を形成するに至る。<br>現在、富士山麓周辺には観光名所が多くある他、夏季シーズンには富士登山が盛んである。<br>')</p>
+<p>In[23]: # 分割後の文書の長さ（文字数）を確認</p>
+<p>print(len(split_documents[0].page_content))<br>print(len(split_documents[1].page_content))</p>
+<p>Out[23]: 221<br>310</p>
+<p>一つの文書が 400 字以内の長さに分割されており、分割された文書間に一定の長さの重複部分があることがわかります。</p>
+<p>○ベクトルインデックスの作成</p>
+<p>検索対象の文書のデータストアが構築できたので、データストアを検索可能にするための</p>
+<p>インデックスを作成します。<br>ここでは、文書の文埋め込みベクトルを格納したインデックス（ベクトルインデックス）を作成します。<br>LangChain でベクトルインデックスを作成するには Vector Store コンポーネントを使用します。<br>ここでは、8.4 節でも用いた最近傍探索ライブラリの Faiss13を利用した Vector Store を、langchain-community の FAISS クラスにより作成します。</p>
+<p>FAISS クラスの from_documents メソッドに、これまでに読み込みと分割を行った文書</p>
+<p>の list と文埋め込みモデルを渡して、Faiss のベクトルインデックスを構築します。</p>
+<p>13 https://github.com/facebookresearch/faiss</p>
+<p>140</p>
+<p>In[24]: from langchain_community.vectorstores import FAISS</p>
+<p># 分割後の文書と文埋め込みモデルを用いて、Faiss のベクトルインデックスを作成<br>vectorstore = FAISS.from_documents(split_documents, embedding_model)</p>
+<p># ベクトルインデックスに登録された文書数を確認<br>print(vectorstore.index.ntotal)</p>
+<p>Out[24]: 1475</p>
+<p>○Retriever コンポーネントの作成</p>
+<p>データストアとベクトルインデックスが構築できたので、検索を実行する Retriever コンポーネントを作成します。<br>Retriever は、13.1.2 節で解説した基本的な構成の RAG における検索器に対応するものです。</p>
+<p>Retriever は、Vector Store コンポーネントの as_retriever メソッドにより簡単に作成することができます。<br>ここで search_kwargs 引数に設定している"k"の値には、Retriever が検索結果として返す文書の数を指定します。</p>
+<p>In[25]: # ベクトルインデックスを元に文書の検索を行う Retriever を初期化</p>
+<p>retriever = vectorstore.as_retriever(search_kwargs={"k": 3})</p>
+<p>Retriever は Runnable であり、invoke メソッドで文書検索を実行できます。<br>Retriever を</p>
+<p>Chain に組み入れる前に、Retriever 単体で文書検索を実行してみましょう。</p>
+<p>In[26]: # 文書の検索を実行</p>
+<p>retrieved_documents = retriever.invoke("四国地方で一番高い山は？ ")</p>
+<p># 検索された文書を確認<br>pprint(retrieved_documents)</p>
+<p>Out[26]: [Document(metadata={'source': '/content/docs.json', 'seq_num': 26,</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'start_index': 0}, page_content=' この項目に含まれる文字「(cid:7745)」は、オペレーティングシステムやブラウザなどの環境により表示が異なります。<br> 石(cid:7745)山（いしづちさん、いしづちやま）は、四国山地西部に位置する標高 1,982 m の山で、近畿以西を「西日本」とした場合の西日本最高峰で、山頂から望む展望が四国八十八景 64 番に選定。<br>愛媛県西条市と久万高原町の境界に位置する。<br> 石鉄山、石鈇山、石土山、石(cid:7744)山とも表記され、伊予の高嶺とも呼ばれる。<br>『日本霊異記』には「石(cid:7744)</p>
+<p>山」と記され、延喜式の神名帳（延喜式神名帳）では「石鉄神社」と記されている。<br>前神寺および横峰寺では「石鈇山（しゃくまざん）」とも呼ぶ。<br>'),</p>
+<p>13・2</p>
+<p>基本的なRAGのシステムの実装</p>
+<p>141</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>Document(metadata={'source': '/content/docs.json', 'seq_num': 1,</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'start_index': 0}, page_content=' 富士山（ふじさん）は、静岡県（富士宮市、富士市、裾野市、御殿場市、駿東郡小山町）と山梨県（富士吉田市、南都留郡鳴沢村）に跨る活火山である。<br>標高 3776.12 m、日本最高峰（剣ヶ峰）の独立峰で、その優美な風貌は日本国外でも日本の象徴として広く知られている。<br> 数多く</p>
+<p>の芸術作品の題材とされ芸術面のみならず、気候や地層など地質学的にも社会に大</p>
+<p>きな影響を与えている。<br>懸垂曲線の山容を有した玄武岩質成層火山で構成され、その山体は駿河湾の海岸まで及ぶ。<br>'),</p>
+<p>Document(metadata={'source': '/content/docs.json', 'seq_num': 96,</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'start_index': 0}, page_content=' 四阿山（あずまやさん）は、長野県と群馬県の県境に跨る山。<br>標高 2,354 m。<br>日本百名山の一つに数えられている。<br>吾妻山・吾嬬山（あがつまやま）などとも呼ばれ、嬬恋村では吾妻山が用いられている。<br> 上信国境の山では、浅間山 (2,568m) に次ぐ標高であり志賀高原最高峰、裏岩菅山 (2,341m) より 13m 高いが、東北最高峰である燧ヶ岳 (2,356m) より2m 低い。<br> 約 80 万年前から 30 万年前に活動した安山岩質溶岩による成層火山で、34 万年前の噴火により直径約 3km のカルデラが形成された。<br>その後の侵(cid:7709)により現在の複数峰による「四阿火山」の形態となる。<br>四阿火山は、西に根子岳(2,207m) 、南に四阿山、東に浦倉山 (2,091m)')]</p>
+<p>Retriever による検索結果として、質問に対する正しい答えである「石(cid:7744)山」を含む文書が上位に現れていることがわかります。<br>LLM がこれらの文書の内容を適切に参考にできれば、正しい答えを含む応答を生成できそうです。</p>
+<p>○RAG の Chain の構築</p>
+<p>RAG の構築に必要なコンポーネントがすべて(cid:7975)ったので、RAG の Chain を構築してみま</p>
+<p>しょう。<br>作成する Chain の構成を図 13.3 に示します。</p>
+<p>まず、質問の文字列 query と文書の文字列 context を引数にとり、Chat Model に入力するプロンプトを返す Prompt Template を、ChatPromptTemplate クラスを用いて作成します。</p>
+<p>In[27]: # 任意の query からメッセージを構築する Prompt Template を作成</p>
+<p>rag_prompt_text = (</p>
+<p>"以下の文書の内容を参考にして、質問に答えてください。<br>\n\n""---\n{context}\n---\n\n 質問: {query}"</p>
+<p>)<br>rag_prompt_template = ChatPromptTemplate.from_messages(</p>
+<p>[("user", rag_prompt_text)]</p>
+<p>)</p>
+<p>作成した Prompt Template の context として、Retriever による検索結果である複数の文書の内容を改行で連結したものを用います。<br>そのようなテキスト整形を行う Runnable を、</p>
+<p>142</p>
+<p>str</p>
+<p>retriever</p>
+<p>list[Document]</p>
+<p>RunnablePassthrough()</p>
+<p>format_documents</p>
+<p>str</p>
+<p>context</p>
+<p>str</p>
+<p>query</p>
+<p>rag_prompt_template</p>
+<p>ChatPromptValue</p>
+<p>chat_model_resp_only</p>
+<p>str</p>
+<p>図 13.3: RAG の Chain の構成</p>
+<p>RunnableLambda クラスを用いて作成します。</p>
+<p>In[28]: from langchain_core.documents import Document</p>
+<p>def format_documents_func(documents: list[Document]) -> str:"""文書のリストを改行で連結した一つの文字列として返す"""return "\n\n".join(</p>
+<p>document.page_content for document in documents</p>
+<p>)</p>
+<p># 定義した関数の処理を行う Runnable を作成<br>format_documents = RunnableLambda(format_documents_func)</p>
+<p>作成した二つの Runnable と、これまでに用いた Chat Model と Retriever を組み合わせて、</p>
+<p>RAG の一連の処理を行う Chain を作成します。</p>
+<p>13・2</p>
+<p>基本的なRAGのシステムの実装</p>
+<p>143</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>In[29]: from langchain_core.runnables import RunnablePassthrough</p>
+<p># RAG の一連の処理を行う Chain を作成<br>rag_chain = (</p>
+<p>{</p>
+<p>"context": retriever | format_documents,<br>"query": RunnablePassthrough(),</p>
+<p>}<br>| rag_prompt_template<br>| chat_model_resp_only</p>
+<p>)</p>
+<p>この Chain における prompt_template への入力のように、複数の要素を Runnable の入力として渡す操作は dict を用いて記述することができます。<br>ここでは、dict に含まれる"context"と"query"が rag_prompt_template の入力となります。</p>
+<p>最後に、作成した Chain に質問文を入力して実行してみます。</p>
+<p>In[30]: # Chain を実行し、結果を確認</p>
+<p>rag_chain_output = rag_chain.invoke("四国地方で一番高い山は？ ")print(rag_chain_output)</p>
+<p>Out[30]: 四国地方で一番高い山は、愛媛県と高知県の県境にある石(cid:7745)山です。<br>標高は 1,982 メー</p>
+<p>(cid:2)→</p>
+<p>トルで、四国地方で最も高い山です。</p>
+<p>RAG の Chain の出力として、正しい答えである「石(cid:7745)山」が得られました。<br>また、山の標高についても、検索された文書の内容に基づいて回答していることが確認できます。<br>ただし</p>
+<p>その一方で、「愛媛県と高知県の県境にある」という説明は正確性を欠いているほか、最後</p>
+<p>に「四国地方で最も高い山です。<br>」という冗長な内容を出力しているなど、出力には改善の</p>
+<p>余地があるといえます。</p>
+<p>13.3 RAG 向けに LLM を指示チューニングする</p>
+<p>前節では、11.2 節で構築した指示チューニング済みの LLM と Hugging Face Hub で公開されている文埋め込みモデルを利用した RAG のシステムを LangChain を使って実装しました。<br>本節では、前節で用いた指示チューニング済みの LLM を、オープンドメイン質問応答（9.1 節）のデータセットを用いて RAG 向けにさらに指示チューニングする方法について解説します。</p>
+<p>本節の実験の中で示すように、前節で用いた指示チューニング済みの LLM は、RAG で想定される質問と関連文書の入力に対して、正しい答えの出力を安定して得ることができません。</p>
+<p>144</p>
+<p>そこで、第 9 章でも用いた、クイズを題材にしたオープンドメイン質問応答のデータセットである AI 王データセットを用いて、LLM を RAG 向けにさらに指示チューニングします。</p>
+<p>13.3.1 AI 王データセットを用いた指示チューニング</p>
+<p>本項の指示チューニングのコードの実行時間の目安は、有料の Colab Pro で使用できる L4GPU を用いて 80 分ほどです。<br>または、A100 GPU を使用することで、処理の高速化も見込めます。<br>なお、無料版の T4 GPU でも妥当な結果が得られる設定を、本書の GitHub リポジトリ14で公開していますので必要に応じて参照してください。</p>
+<p>○環境の準備</p>
+<p>はじめに、必要なパッケージをインストールします。</p>
+<p>In[1]: !pip install datasets transformers[torch,sentencepiece] trl peft</p>
+<p>(cid:2)→</p>
+<p>bitsandbytes</p>
+<p>実験結果を再現しやすくするために、乱数のシードを固定しておきます。</p>
+<p>In[2]: from transformers.trainer_utils import set_seed</p>
+<p># 乱数のシードを設定<br>set_seed(42)</p>
+<p>次に、学習する LLM の重みの保存場所を用意しておきます。<br>ここでは、Google ドライブをマウントしてそこに保存しますが、Colab 以外の計算機環境を使用している場合や、学習結果をバックアップする必要のない場合はスキップしてかまいません。</p>
+<p>In[3]: from google.colab import drive</p>
+<p># Google ドライブを"drive"ディレクトリ以下にマウント<br>drive.mount("drive")</p>
+<p>○データセットの準備</p>
+<p>指示チューニングに用いるデータセットとして、Hugging Face Hub の本書リポジトリllm-book/aio-retriever15にて公開している AI 王データセットを読み込みます。<br>このデータセットは、質問応答のコンペティション「AI 王」16で使用されたクイズ問題に対して、問題文との関連度が高い Wikipedia 記事のパッセージを付与することで作成されたもので</p>
+<p>14 https://github.com/ghmagazine/llm-book/tree/main/chapter13<br>15 https://huggingface.co/datasets/llm-book/aio-retriever<br>16 https://sites.google.com/view/project-aio/</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p>145</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>す17。</p>
+<p>In[4]: from datasets import load_dataset</p>
+<p># Hugging Face Hub の llm-book/aio-retriever のリポジトリから<br># AI 王データセットを読み込む<br>dataset = load_dataset(</p>
+<p>"llm-book/aio-retriever", trust_remote_code=True</p>
+<p>)</p>
+<p># 読み込まれたデータセットの形式と事例数を確認<br>print(dataset)</p>
+<p>Out[4]: DatasetDict({</p>
+<p>train: Dataset({</p>
+<p>(cid:2)→</p>
+<p>features: ['qid', 'competition', 'timestamp', 'section',<br>'number', 'original_question', 'original_answer',<br>'original_additional_info', 'question', 'answers',<br>'passages', 'positive_passage_indices',<br>'negative_passage_indices'],</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>num_rows: 22335</p>
+<p>})<br>validation: Dataset({</p>
+<p>(cid:2)→</p>
+<p>features: ['qid', 'competition', 'timestamp', 'section',<br>'number', 'original_question', 'original_answer',<br>'original_additional_info', 'question', 'answers',<br>'passages', 'positive_passage_indices',<br>'negative_passage_indices'],</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>num_rows: 1000</p>
+<p>})</p>
+<p>})</p>
+<p>データセットの内容を確認します。</p>
+<p>In[5]: from pprint import pprint</p>
+<p>pprint(dataset["validation"][0])</p>
+<p>Out[5]: {'answers': [' ジェット団'],</p>
+<p>'competition': ' 第 2 回 AI 王','negative_passage_indices': [1, 2, ...（中略）..., 99],'number': '1',</p>
+<p>146</p>
+<p>17 関連パッセージの付与は、全文検索エンジンの Elasticsearch を用いて自動的に行われています。</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p>'original_additional_info': '','original_answer': ' ジェット団','original_question': ' 映画『ウエスト・サイド物語』に登場する 2 つの少年グ</p>
+<p>(cid:2)→</p>
+<p>ループといえば、シャーク団と何団？ ',</p>
+<p>'passages': [{'passage_id': 265844,</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'text': ' ニューヨークのウエスト・サイド。<br>午後 5 時。<br>ポーランド系アメリカ人の少年非行グループ「ジェッツ」(ジェット団)と、新参のプエルトリコ系アメリカ人の少年非行グループ「シャークス」(シャーク団) は、なわばりを巡って対立している。<br>今日も 2 グループの間で争いが起きるが警官の呼子笛の音に止められる (“Prologue”「プロローグ」)。<br>クラプキ巡査とシュランク警部補が現れて少年たちに説教をして帰っていく。</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>ジェッツのリーダー・リフはシャークスとの関係をはっきりさせ</p>
+<p>るために決闘しようと言い出し、ジェッツのメンバーが賛成す</p>
+<p>る。<br>ついては決闘についての取り決めをシャークスとする必要</p>
+<p>があり、リフは自分の副官にトニーを選ぶ。<br>メンバーは初めトニーはもう抜けたと反対するが、リフは (海兵隊のように)「一度ジェッツになったら死ぬまでジェッツだ」と歌う。<br>',</p>
+<p>'title': ' ウエスト・サイド物語'},</p>
+<p>{'passage_id': 3738175,</p>
+<p>'text': '『ウエストサイド物語』(ウエストサイドものがたり) は、宝塚歌劇団によるミュージカル作品。<br>ブロードウェイ・ミュージ</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>カルの傑作『ウエストサイド物語』の日本での上演の一つである。<br>',</p>
+<p>'title': ' ウエストサイド物語 (宝塚歌劇)'},</p>
+<p>...（中略）...{'passage_id': 2965219,</p>
+<p>'text': ' 鶴本 崇文 (つるもと たかふみ、1985 年 5 月 20 日 - '</p>
+<p>') は、大阪府出身の競艇選手。<br>登録番号 4384。<br>身長</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>164cm。<br>血液型 A 型。<br>98 期。<br>大阪支部所属。<br>同期に平山智加、是澤孝宏、松田祐季らがいる。<br>2000 年制作、映画岸和田少年愚連隊 '</p>
+<p>' 野球団〈岸和田少年野球団〉に小鉄 (少年期) 役として出</p>
+<p>(cid:2)→</p>
+<p>演したことがある。<br>',</p>
+<p>'title': ' 鶴本崇文'}],'positive_passage_indices': [0, 3, 5, 7, 12, 22],'qid': 'AIO02-0001','question': ' 映画『ウエスト・サイド物語』に登場する 2 つの少年グループといえ</p>
+<p>(cid:2)→</p>
+<p>ば、シャーク団と何団?','section': ' 開発データ問題','timestamp': '2021/01/29'}</p>
+<p>このデータセットの各事例には、"question"にクイズの問題文、"answers"に正解文 147</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>字 列 の list、"passages"に 問 題 文 と の 関 連 度 が 高 い パ ッ セ ー ジ の list が そ れ ぞ れ与 え ら れ て い ま す 。<br>"passages"の 各 パ ッ セ ー ジ に は 、Wikipedia 記 事 の タ イ ト ル と 本文 か ら 抜 粋 さ れ た テ キ ス ト が"title"と"text"に そ れ ぞ れ 与 え ら れ て い ま す 。<br>ま た 、"positive_passage_indices"と"negative_passage_indices"に は 、"passage"の 何番目のパッセージが正解を含んでいる（正例）か正解を含まない（負例）かを示すインデックスの list がそれぞれ与えられています。</p>
+<p>本節の指示チューニングの実験では、各問題に付与されているパッセージのうち、関連度が高い上位 3 件のパッセージを使用することにします。<br>また、与えられたパッセージの内容から正解を答えることが可能な事例だけを用いて指示チューニングを行います。<br>そのために、データセットから上位 3 件のパッセージに正例が一つも含まれていない事例を除外するフィルタリング処理を適用します。</p>
+<p>In[6]: from typing import Any</p>
+<p>def filter_example(</p>
+<p>example: dict[str, Any], max_passages: int = 3</p>
+<p>) -> bool:</p>
+<p>"""上位 max_passages 件のパッセージに正例が含まれていない事例を除外"""if len(example["positive_passage_indices"]) == 0:</p>
+<p>return False</p>
+<p>if example["positive_passage_indices"][0] >= max_passages:</p>
+<p>return False</p>
+<p>return True</p>
+<p>dataset = dataset.filter(filter_example)</p>
+<p>続いて、データセットの各事例を LLM への入力に適した会話データの形式に変換する処理</p>
+<p>を行います。<br>プロンプトの文章として、9.5.2 節で用いたものを使用します。</p>
+<p>In[7]: def process_example(</p>
+<p>example: dict[str, Any], max_passages: int = 3</p>
+<p>) -> dict[str, Any]:</p>
+<p>"""質問、パッセージ、正解の組からプロンプトを作成し、会話データに変換"""</p>
+<p># example から必要な情報を取得<br>question = example["question"]<br>answer = example["answers"][0]<br>passages = [p["text"] for p in example["passages"]]</p>
+<p>148</p>
+<p># max_passages 件のパッセージを選択<br>passages = passages[:max_passages]</p>
+<p>messages: list[dict[str, str]] = []<br># プロンプトとパッセージをユーザのメッセージとして会話データに追加<br>prompt_text = "".join(</p>
+<p>[</p>
+<p>]</p>
+<p>"あなたには今からクイズに答えてもらいます。<br>","問題を与えますので、その解答のみを簡潔に出力してください。<br>\n","また解答の参考になりうるテキストを与えます。<br>","解答を含まない場合もあるのでその場合は無視してください。<br>\n\n","---\n","\n\n".join(passages),"\n---\n\n",f"問題: {question}",</p>
+<p>)<br>messages.append({"role": "user", "content": prompt_text})<br># LLM が出力すべき内容（クイズ問題の答え）を会話データに追加<br>messages.append({"role": "assistant", "content": answer})</p>
+<p># 会話データを事例の"messages"フィールドに追加<br>example["messages"] = messages<br>return example</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p>dataset = dataset.map(</p>
+<p>process_example, remove_columns=dataset["train"].column_names</p>
+<p>)</p>
+<p>前処理後のデータセットに対して、データの形式と事例数を確認します。</p>
+<p>In[8]: print(dataset)</p>
+<p>Out[8]: DatasetDict({</p>
+<p>train: Dataset({</p>
+<p>features: ['messages'],<br>num_rows: 13951</p>
+<p>})<br>validation: Dataset({</p>
+<p>features: ['messages'],<br>num_rows: 637</p>
+<p>})</p>
+<p>})</p>
+<p>前処理後のデータセットの内容を確認します。</p>
+<p>149</p>
+<p>In[9]: pprint(dataset["validation"][0])</p>
+<p>Out[9]: {'messages': [</p>
+<p>{'content': ' あなたには今からクイズに答えてもらいます。<br>問題を与えますの</p>
+<p>(cid:2)→</p>
+<p>で、その解答のみを簡潔に出力してください。<br>\n'</p>
+<p>' また解答の参考になりうるテキストを与えます。<br>解答を含まない</p>
+<p>(cid:2)→</p>
+<p>場合もあるのでその場合は無視してください。<br>\n'</p>
+<p>'\n''---\n'' ニューヨークのウエスト・サイド。<br>午後 5 時。<br>ポーランド系アメ</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>リカ人の少年非行グループ「ジェッツ」(ジェット団) と、新参のプエルトリコ系アメリカ人の少年非行グループ「シャークス」(シャーク団) は、なわばりを巡って対立している。<br>今日も2 グループの間で争いが起きるが警官の呼子笛の音に止められる (“Prologue”「プロローグ」)。<br>クラプキ巡査とシュランク警部補が現れて少年たちに説教をして帰っていく。<br>ジェッツの</p>
+<p>リーダー・リフはシャークスとの関係をはっきりさせるために</p>
+<p>決闘しようと言い出し、ジェッツのメンバーが賛成する。<br>つい</p>
+<p>ては決闘についての取り決めをシャークスとする必要があり、</p>
+<p>リフは自分の副官にトニーを選ぶ。<br>メンバーは初めトニーはもう抜けたと反対するが、リフは (海兵隊のように)「一度ジェッツになったら死ぬまでジェッツだ」と歌う。<br>\n'</p>
+<p>'\n''『ウエストサイド物語』(ウエストサイドものがたり) は、宝塚歌劇団によるミュージカル作品。<br>ブロードウェイ・ミュージカルの傑作『ウエストサイド物語』の日本での上演の一つである。<br>\n'</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'\n''『ウエスト・サイド物語』(ウエスト・サイドものがたり、West</p>
+<p>(cid:2)→</p>
+<p>Side '</p>
+<p>(cid:2)→</p>
+<p>'Story) は、アーサー・ローレンツ脚本、レナード・バーンスタイン音楽、スティーヴン・ソンドハイム歌詞のブロードウェイ・ミュージカル。<br>原案ジェローム・ロビンズ。<br>1957 年初演。<br>『ウエスト・サイド・ストーリー』とも呼ばれる。<br>シェイクスピア</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>の戯曲『ロミオとジュリエット』に着想し、当時のニューヨー</p>
+<p>クの社会的背景を織り込みつつ、ポーランド系アメリカ人とプエルトリコ系アメリカ人との 2 つの異なる少年非行グループの抗争の犠牲となる若い男女の 2 日間の恋と死までを描く。<br>1961年と 2021 年に映画化された。<br>\n'</p>
+<p>'---\n''\n'' 問題: 映画『ウエスト・サイド物語』に登場する 2 つの少年グ</p>
+<p>(cid:2)→</p>
+<p>ループといえば、シャーク団と何団?',</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>150</p>
+<p>'role': 'user'},</p>
+<p>{'content': ' ジェット団', 'role': 'assistant'}</p>
+<p>]}</p>
+<p>データセットの事例が会話データの形式に変換されていることが確認できます。</p>
+<p>○トークナイザとモデルの準備</p>
+<p>11.2 節で構築した指示チューニング済みモデルとトークナイザを、Hugging Face Hub の本</p>
+<p>書リポジトリ llm-book/Swallow-7b-hf-oasst1-21k-ja18から読み込みます。</p>
+<p>In[10]: import torch</p>
+<p>from transformers import (</p>
+<p>AutoModelForCausalLM,<br>AutoTokenizer,<br>BitsAndBytesConfig,</p>
+<p>)</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p># Hugging Face Hub におけるモデル名を指定<br>base_model_name = "llm-book/Swallow-7b-hf-oasst1-21k-ja"</p>
+<p># モデルの量子化の設定<br>quantization_config = BitsAndBytesConfig(</p>
+<p>load_in_4bit=True, # 4 ビット量子化のパラメータを読み込むbnb_4bit_quant_type="nf4", # NF4 量子化を使用bnb_4bit_compute_dtype=torch.bfloat16, # 計算時のデータ型として</p>
+<p>(cid:2)→</p>
+<p>BF16 を使用</p>
+<p>)</p>
+<p># モデルの量子化の設定を用いてモデルを読み込む<br>model = AutoModelForCausalLM.from_pretrained(</p>
+<p>base_model_name,torch_dtype=torch.bfloat16,quantization_config=quantization_config, # 量子化設定use_cache=False, # 後に gradient checkpointing を有効にするために必要(cid:2)→device_map="auto",</p>
+<p>)</p>
+<p># トークナイザを読み込む<br>tokenizer = AutoTokenizer.from_pretrained(base_model_name)</p>
+<p>18 https://huggingface.co/llm-book/Swallow-7b-hf-oasst1-21k-ja</p>
+<p>151</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>○指示チューニング前のモデルの評価</p>
+<p>モデルの指示チューニングを始める前に、現状のモデルがどの程度 AI 王データセットの問題に正しく答えられるかを、検証セットを用いて評価します。<br>問題文の入力に対してモデ</p>
+<p>ルが応答として出力する文字列と正解の文字列が完全一致していれば正答とみなして、検証</p>
+<p>セット全体における正答数の割合（正解率）を評価します。</p>
+<p>In[11]: from datasets import Dataset</p>
+<p>from tqdm.notebook import tqdm<br>from transformers import PreTrainedModel</p>
+<p>def evaluate(</p>
+<p>model: PreTrainedModel, dataset: Dataset</p>
+<p>) -> tuple[list[str], list[str], float]:</p>
+<p>"""データセットの各問題に対するモデルの出力を評価し、正解率を算出"""pred_answers = []gold_answers = []num_correct = 0</p>
+<p>for example in tqdm(dataset):</p>
+<p># プロンプトにチャットテンプレートを適用<br>model_inputs = tokenizer.apply_chat_template(</p>
+<p>example["messages"][:-1],<br>add_generation_prompt=True,<br>return_tensors="pt",</p>
+<p>).to("cuda")</p>
+<p># プロンプトの長さ（トークン数）を取得しておく<br>input_length = model_inputs.shape[1]</p>
+<p># モデルにプロンプトを入力し、出力を得る<br>generated_ids = model.generate(</p>
+<p>model_inputs,<br>max_new_tokens=32,<br>do_sample=False,<br>temperature=None,<br>top_p=None,</p>
+<p>)</p>
+<p># モデルの出力から答えの部分を文字列として取り出す<br>pred_answer = tokenizer.batch_decode(</p>
+<p>generated_ids[:, input_length:], skip_special_tokens=True</p>
+<p>152</p>
+<p>)[0]</p>
+<p># 正解の文字列を取り出す<br>gold_answer = example["messages"][-1]["content"]</p>
+<p># モデルの答えと正解が一致していれば正答とカウント<br>if pred_answer == gold_answer:</p>
+<p>num_correct += 1</p>
+<p># モデルの答えと正解をそれぞれリストに追加<br>pred_answers.append(pred_answer)<br>gold_answers.append(gold_answer)</p>
+<p># 正解率を計算<br>accuracy = num_correct / len(pred_answers)</p>
+<p>return pred_answers, gold_answers, accuracy</p>
+<p>In[12]: pred_answers, gold_answers, accuracy = evaluate(</p>
+<p>model, dataset["validation"]</p>
+<p>)print(f"正解率: {accuracy:.1%}")</p>
+<p>Out[12]: 正解率: 52.3%</p>
+<p>本節の指示チューニング前のモデルの正解率は約 52% でした。<br>このモデルを RAG の構成要素として用いるには心許ない数値です。<br>モデルが予測した答えの一部を確認してみましょう。</p>
+<p>In[13]: for pred_answer, gold_answer in zip(</p>
+<p>pred_answers[:20], gold_answers[:20]</p>
+<p>):</p>
+<p>print(f"正解: {gold_answer} / 予測: {pred_answer}")</p>
+<p>Out[13]: 正解: ジェット団 / 予測: ジェッツ正解: コマイ / 予測: スケトウダラ正解: START / 予測: START正解: ニュートン / 予測: アイザック・ニュートン正解: 天平文化 / 予測: 聖武天皇の時代に栄えた、東大寺正倉院や唐招提寺金堂など、</p>
+<p>(cid:2)→</p>
+<p>中国・唐の影響を強く受け</p>
+<p>正解: アメリカンリーグ / 予測: アメリカンリーグ正解: 華道 / 予測: 池坊、草月流、小原流は、日本の伝統的な生け花の三大流派であ</p>
+<p>(cid:2)→</p>
+<p>る。<br>池坊は伝統</p>
+<p>正解: ラストベルト / 予測: ラストベルト正解: 天童市 / 予測: 天童市</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p>153</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>正解: 医学部 / 予測: 安部公房は東京大学医学部出身。<br>正解: 村田珠光 / 予測: 山上宗二は、「侘び茶」の創始者として知られる室町時代の茶</p>
+<p>(cid:2)→</p>
+<p>人である。<br>彼は</p>
+<p>正解: 23 時 / 予測: 日本のテレビ業界で「プライムタイム」といえば、毎日 19 時か</p>
+<p>(cid:2)→</p>
+<p>ら 23 時までの時間帯のことです。<br>正解: 佐々木彩夏 / 予測: 佐々木彩夏正解: 早口言葉 / 予測: 英語で「タングツイスター」という言葉遊びは「早口言葉」で</p>
+<p>(cid:2)→</p>
+<p>す。</p>
+<p>正解: 昭和基地 / 予測: 昭和基地正解: 開口一番 / 予測: 「開口一番」正解: マクベス / 予測: マクベス正解: ニ長調 / 予測: ト短調正解: 版籍奉還 / 予測: 版籍奉還正解: IBS / 予測: IBS</p>
+<p>モデルの誤りとしては、単純に答えるべき事物を間違えている例がある一方で、答えの事物</p>
+<p>ではなく何らかの文章を出力してしまっているものも散見されます。<br>後者のような誤りは、</p>
+<p>本節で行う指示チューニングによって、モデルが従うべき出力のフォーマットを学習するこ</p>
+<p>とで改善が期待できます。</p>
+<p>○指示チューニングの準備</p>
+<p>現状のモデルの性能がわかったので、AI 王データセットを使った指示チューニングを進めましょう。<br>まず準備として、訓練セットに対するチャットテンプレートの適用、ミニバッチ構築処理に用いる collate 関数の初期化、モデルへの LoRA の適用を行います。<br>これらの処理は、11.2 節で行ったものと同様です。</p>
+<p>In[14]: # 訓練セットのすべての事例にチャットテンプレートを適用</p>
+<p>tokenized_train_dataset = [</p>
+<p>tokenizer.apply_chat_template(example["messages"])<br>for example in dataset["train"]</p>
+<p>]</p>
+<p>In[15]: from trl import DataCollatorForCompletionOnlyLM</p>
+<p># collate 関数を初期化<br>bos = tokenizer.bos_token<br>collator = DataCollatorForCompletionOnlyLM(</p>
+<p># ユーザとアシスタントそれぞれの発話開始文字列instruction_template=bos + "ユーザ：",response_template=bos + "アシスタント：",tokenizer=tokenizer, # トークナイザ</p>
+<p>154</p>
+<p>)</p>
+<p>In[16]: from peft import LoraConfig, TaskType, get_peft_model</p>
+<p># LoRA の設定<br>peft_config = LoraConfig(</p>
+<p>r=128, # 差分行列のランクlora_alpha=128, # LoRA 層の出力のスケールを調整するハイパーパラメータlora_dropout=0.05, # LoRA 層に適用するドロップアウトtask_type=TaskType.CAUSAL_LM, # LLM が解くタスクのタイプを指定# LoRA で学習するモジュールtarget_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj",</p>
+<p>],</p>
+<p>)</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p>model.enable_input_require_grads() # 学習を行うために必要# モデルに LoRA を適用model = get_peft_model(model, peft_config)model.print_trainable_parameters() # 学習可能なパラメータ数を表示</p>
+<p>Out[16]: trainable params: 319,815,680 || all params: 7,149,785,088 ||</p>
+<p>(cid:2)→</p>
+<p>trainable%: 4.4731</p>
+<p>○指示チューニングの実行</p>
+<p>データセットとモデルの準備が整ったので、指示チューニングを実行します。</p>
+<p>In[17]: from transformers import Trainer, TrainingArguments</p>
+<p># 訓練のハイパーパラメータを設定<br>training_args = TrainingArguments(</p>
+<p>output_dir="./drive/MyDrive/llm_book/RAG_IT_results", # 結果の保</p>
+<p>(cid:2)→</p>
+<p>存フォルダ</p>
+<p>bf16=True, # BF16 を使用した学習の有効化max_steps=100, # 訓練ステップ数per_device_train_batch_size=2, # 訓練時のバッチサイズgradient_accumulation_steps=8, # 勾配累積のステップ数（5.5.2 節）gradient_checkpointing=True, # 勾配チェックポインティングの有効化</p>
+<p>(cid:2)→</p>
+<p>（5.5.3 節）</p>
+<p>155</p>
+<p>optim="paged_adamw_8bit", # 最適化器learning_rate=1e-4, # 学習率lr_scheduler_type="cosine", # 学習率スケジューラの種類max_grad_norm=0.3, # 勾配クリッピングにおけるノルムの最大値（9.4.3 節）warmup_ratio=0.1, # 学習率のウォームアップの長さ（5.2.8 節）logging_steps=10, # ロギングの頻度save_steps=50, # モデルの保存頻度</p>
+<p>)</p>
+<p># Trainer を初期化<br>trainer = Trainer(</p>
+<p>model,train_dataset=tokenized_train_dataset, # トークン ID 化されたデータ</p>
+<p>(cid:2)→</p>
+<p>セット</p>
+<p>data_collator=collator, # ラベルの加工及びミニバッチ構築処理を行うモ</p>
+<p>(cid:2)→</p>
+<p>ジュール</p>
+<p>args=training_args, # 訓練の設定tokenizer=tokenizer, # パラメータ保存時にトークナイザも一緒に保存する</p>
+<p>(cid:2)→</p>
+<p>ために指定</p>
+<p>)</p>
+<p># モデルの訓練を実行<br>trainer.train()</p>
+<p>○指示チューニング後のモデルの評価</p>
+<p>モデルの訓練が終了したら、もう一度検証データで正解率を評価してみましょう。</p>
+<p>In[18]: pred_answers, gold_answers, accuracy = evaluate(</p>
+<p>model, dataset["validation"]</p>
+<p>)print(f"正解率: {accuracy:.1%}")</p>
+<p>Out[18]: 正解率: 82.1%</p>
+<p>指示チューニング前は約 52% だった正解率が約 82% に改善しました。<br>モデルが予測した答えも確認してみます。</p>
+<p>In[19]: for pred_answer, gold_answer in zip(</p>
+<p>pred_answers[:20], gold_answers[:20]</p>
+<p>):</p>
+<p>print(f"正解: {gold_answer} / 予測: {pred_answer}")</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>156</p>
+<p>Out[19]: 正解: ジェット団 / 予測: ジェッツ正解: コマイ / 予測: スケトウダラ正解: START / 予測: START正解: ニュートン / 予測: アイザック・ニュートン正解: 天平文化 / 予測: 天平文化正解: アメリカンリーグ / 予測: アメリカンリーグ正解: 華道 / 予測: 華道正解: ラストベルト / 予測: ラストベルト正解: 天童市 / 予測: 天童市正解: 医学部 / 予測: 医学部正解: 村田珠光 / 予測: 村田珠光正解: 23 時 / 予測: 23 時正解: 佐々木彩夏 / 予測: 玉井詩織正解: 早口言葉 / 予測: なぞなぞ正解: 昭和基地 / 予測: 昭和基地正解: 開口一番 / 予測: 開口一番正解: マクベス / 予測: マクベス正解: ニ長調 / 予測: ヘ長調正解: 版籍奉還 / 予測: 版籍奉還正解: IBS / 予測: IBS</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p>答えるべき事物を間違えている事例は依然としてあるものの、訓練前のモデルに見られた、</p>
+<p>文章を出力してしまうような事例は改善していることが確認できます。</p>
+<p>○モデルの保存</p>
+<p>上 記 の コ ー ド を 実 行 す る と 、学 習 し た モ デ ル の 重 み は 、Google ド ラ イ ブの./llm_book/RAG_IT_results/checkpoint-100 というフォルダに保存されています。</p>
+<p>11.2.7 節同様に、Hugging Face Hub にログイン後、モデルをアップロードします。</p>
+<p>In[20]: from huggingface_hub import notebook_login</p>
+<p>notebook_login()</p>
+<p>In[21]: from peft import PeftModel</p>
+<p># 学習した LoRA のパラメータを量子化していない学習前のモデルに足し合わせる<br>base_model = AutoModelForCausalLM.from_pretrained(</p>
+<p>base_model_name,<br>torch_dtype=torch.bfloat16,</p>
+<p>)<br>checkpoint_path =</p>
+<p>(cid:2)→</p>
+<p>"./drive/MyDrive/llm_book/RAG_IT_results/checkpoint-100"</p>
+<p>157</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>tuned_model = PeftModel.from_pretrained(base_model, checkpoint_path)</p>
+<p># LoRA のパラメータのみをアップロードする場合は次の行をコメントアウト<br>tuned_model = tuned_model.merge_and_unload()</p>
+<p># Hugging Face Hub のリポジトリ名を指定<br># "YOUR-ACCOUNT"は自らのユーザ名に置き換えてください<br>repo_name = "YOUR-ACCOUNT/Swallow-7b-hf-oasst1-21k-ja-aio-retriever"</p>
+<p># トークナイザをアップロード<br>tokenizer.push_to_hub(repo_name)<br># モデルをアップロード<br>tuned_model.push_to_hub(repo_name)</p>
+<p>13.3.2 指示チューニングしたモデルを LangChain で使う</p>
+<p>ここまでは、AI 王データセットで指示チューニングした LLM のクイズ解答性能を、データセットにあらかじめ付与されているパッセージを用いて評価しました。<br>ここからは、指示チューニングした LLM を、検索器までを含めた RAG のシステムに組み入れ、実際に質問に答えられるかを確かめます。<br>13.2 節と同様に RAG を LangChain で実装し、AI 王データセットで指示チューニングした LLM をコンポーネントに使用します。</p>
+<p>本項のコードの内容は単一の事例を中心とした動作確認であり、計算時間のかかる学習や</p>
+<p>評価は行いません。<br>Colab で無料で提供される T4 GPU で動作可能です。</p>
+<p>○環境の準備</p>
+<p>はじめに、必要なパッケージをインストールします。</p>
+<p>In[1]: !pip install transformers[torch,sentencepiece] langchain</p>
+<p>(cid:2)→</p>
+<p>langchain-community langchain-huggingface faiss-cpu jq</p>
+<p>LangChain の Hugging Face 連携を使用するために、Hugging Face Hub にログインします。</p>
+<p>In[2]: from huggingface_hub import notebook_login</p>
+<p>notebook_login()</p>
+<p>実験結果を再現しやすくするために、乱数のシードを固定しておきます。</p>
+<p>In[3]: from transformers.trainer_utils import set_seed</p>
+<p>158</p>
+<p># 乱数のシードを設定</p>
+<p>set_seed(42)</p>
+<p>○Chat Model の作成</p>
+<p>AI 王データセットで指示チューニングしたモデルを用いて Chat Model コンポーネントを作成します。<br>ここでは、前項のコードで筆者が指示チューニングを行ったモデルを Hugging FaceHub の本書リポジトリ llm-book/Swallow-7b-hf-oasst1-21k-ja-aio-retriever19よりダウンロードして使用します。</p>
+<p>In[4]: import torch</p>
+<p>from langchain_huggingface import (</p>
+<p>ChatHuggingFace,<br>HuggingFacePipeline,</p>
+<p>)<br>from transformers import (</p>
+<p>AutoModelForCausalLM,<br>AutoTokenizer,<br>pipeline,</p>
+<p>)</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p># Hugging Face Hub におけるモデル名を指定<br>model_name = "llm-book/Swallow-7b-hf-oasst1-21k-ja-aio-retriever"</p>
+<p># モデルを読み込む<br>model = AutoModelForCausalLM.from_pretrained(</p>
+<p>model_name,<br>torch_dtype=torch.bfloat16,<br>device_map="auto",</p>
+<p>)</p>
+<p># トークナイザを読み込む<br>tokenizer = AutoTokenizer.from_pretrained(model_name)</p>
+<p># テキスト生成用のパラメータを指定<br>generation_config = {</p>
+<p>"max_new_tokens": 32,<br>"do_sample": False,<br>"temperature": None,<br>"top_p": None,</p>
+<p>}</p>
+<p>19 https://huggingface.co/llm-book/Swallow-7b-hf-oasst1-21k-ja-aio-retriever</p>
+<p>159</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p># テキスト生成を行うパイプラインを作成<br>text_generation_pipeline = pipeline(</p>
+<p>"text-generation",<br>model=model,<br>tokenizer=tokenizer,<br>device_map="auto",<br>**generation_config,</p>
+<p>)</p>
+<p># パイプラインから LangChain の LLM コンポーネントを作成<br>llm = HuggingFacePipeline(pipeline=text_generation_pipeline)</p>
+<p># LLM コンポーネントを元に Chat Model コンポーネントを作成<br>chat_model = ChatHuggingFace(llm=llm, tokenizer=tokenizer)</p>
+<p>○Embedding Model の作成</p>
+<p>文埋め込みを行う Embedding Model コンポーネントは、前節の実験と同様に BGE-M3 の</p>
+<p>モデルを使用します。</p>
+<p>In[5]: from langchain_huggingface.embeddings import HuggingFaceEmbeddings</p>
+<p># Hugging Face Hub におけるモデル名を指定<br>embedding_model_name = "BAAI/bge-m3"</p>
+<p># モデル名から Embedding Model を初期化<br>embedding_model = HuggingFaceEmbeddings(<br>model_name=embedding_model_name,<br>model_kwargs={"model_kwargs": {"torch_dtype": torch.float16}},</p>
+<p>)</p>
+<p>○データストアの構築</p>
+<p>前節の実験で用いたものと同じ文書ファイルを使用して、データストアを構築します。</p>
+<p>In[6]: # 検索対象の文書集合のファイルをダウンロード</p>
+<p>!wget \<br>https://github.com/ghmagazine/llm-book/raw/main/chapter13/docs.json</p>
+<p>In[7]: from langchain_community.document_loaders import JSONLoader</p>
+<p>160</p>
+<p># JSON ファイルから文書を読み込むための Document Loader を初期化<br>document_loader = JSONLoader(</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p>file_path="./docs.json", # 読み込みを行うファイルjq_schema=".text", # 読み込み対象のフィールドjson_lines=True, # JSON Lines 形式のファイルであることを指定</p>
+<p>)</p>
+<p># 文書の読み込みを実行<br>documents = document_loader.load()</p>
+<p># 読み込まれた文書数を確認<br>print(len(documents))</p>
+<p>Out[7]: 103</p>
+<p>前節の実験と同様に、文書の分割を行います。</p>
+<p>In[8]: from langchain_text_splitters import RecursiveCharacterTextSplitter</p>
+<p># 文書を指定した文字数で分割する Text Splitter を初期化<br>text_splitter = RecursiveCharacterTextSplitter(</p>
+<p>chunk_size=400, # 分割する最大文字数chunk_overlap=100, # 分割された文書間で重複させる最大文字数add_start_index=True, # 元の文書における開始位置の情報を付与</p>
+<p>)</p>
+<p># 文書の分割を実行<br>split_documents = text_splitter.split_documents(documents)</p>
+<p># 分割後の文書数を確認<br>print(len(split_documents))</p>
+<p>Out[8]: 1475</p>
+<p>○検索対象の文書のベクトルインデックスの作成</p>
+<p>前節の実験と同様の手順で、分割後の文書の Faiss のベクトルインデックスを作成し</p>
+<p>ます。</p>
+<p>In[9]: from langchain_community.vectorstores import FAISS</p>
+<p># 分割後の文書と文埋め込みモデルを用いて、Faiss のベクトルインデックスを作成<br>vectorstore = FAISS.from_documents(split_documents, embedding_model)</p>
+<p># ベクトルインデックスに登録された文書数を確認</p>
+<p>161</p>
+<p>print(vectorstore.index.ntotal)</p>
+<p>Out[9]: 1475</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>○Retriever コンポーネントの作成</p>
+<p>作成したベクトルインデックスを元に、文書の検索を行う Retriever コンポーネントを初</p>
+<p>期化します。</p>
+<p>In[10]: retriever = vectorstore.as_retriever(search_kwargs={"k": 3})</p>
+<p>Retriever に対して検索を実行してみます。</p>
+<p>In[11]: from pprint import pprint</p>
+<p># 文書の検索を実行retrieved_documents = retriever.invoke("四国地方で一番高い山は？ ")</p>
+<p># 検索された文書を確認<br>pprint(retrieved_documents)</p>
+<p>Out[11]: [Document(metadata={'source': '/content/docs.json', 'seq_num': 26,</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'start_index': 0}, page_content=' この項目に含まれる文字「(cid:7745)」は、オペレーティングシステムやブラウザなどの環境により表示が異なります。<br> 石(cid:7745)山（いしづちさん、いしづちやま）は、四国山地西部に位置する標高 1,982 m の山で、近畿以西を「西日本」とした場合の西日本最高峰で、山頂から望む展望が四国八十八景 64 番に選定。<br>愛媛県西条市と久万高原町の境界に位置する。<br> 石鉄山、石鈇山、石土山、石(cid:7744)山とも表記され、伊予の高嶺とも呼ばれる。<br>『日本霊異記』には「石(cid:7744)</p>
+<p>山」と記され、延喜式の神名帳（延喜式神名帳）では「石鉄神社」と記されている。<br>前神寺および横峰寺では「石鈇山（しゃくまざん）」とも呼ぶ。<br>'),</p>
+<p>Document(metadata={'source': '/content/docs.json', 'seq_num': 1,</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'start_index': 0}, page_content=' 富士山（ふじさん）は、静岡県（富士宮市、富士市、裾野市、御殿場市、駿東郡小山町）と山梨県（富士吉田市、南都留郡鳴沢村）に跨る活火山である。<br>標高 3776.12 m、日本最高峰（剣ヶ峰）の独立峰で、その優美な風貌は日本国外でも日本の象徴として広く知られている。<br> 数多く</p>
+<p>の芸術作品の題材とされ芸術面のみならず、気候や地層など地質学的にも社会に大</p>
+<p>きな影響を与えている。<br>懸垂曲線の山容を有した玄武岩質成層火山で構成され、その山体は駿河湾の海岸まで及ぶ。<br>'),</p>
+<p>162</p>
+<p>Document(metadata={'source': '/content/docs.json', 'seq_num': 96,</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>(cid:2)→</p>
+<p>'start_index': 0}, page_content=' 四阿山（あずまやさん）は、長野県と群馬県の県境に跨る山。<br>標高 2,354 m。<br>日本百名山の一つに数えられている。<br>吾妻山・吾嬬山（あがつまやま）などとも呼ばれ、嬬恋村では吾妻山が用いられている。<br> 上信国境の山では、浅間山 (2,568m) に次ぐ標高であり志賀高原最高峰、裏岩菅山 (2,341m) より 13m 高いが、東北最高峰である燧ヶ岳 (2,356m) より2m 低い。<br> 約 80 万年前から 30 万年前に活動した安山岩質溶岩による成層火山で、34 万年前の噴火により直径約 3km のカルデラが形成された。<br>その後の侵(cid:7709)により現在の複数峰による「四阿火山」の形態となる。<br>四阿火山は、西に根子岳(2,207m) 、南に四阿山、東に浦倉山 (2,091m)')]</p>
+<p>○RAG の Chain の構築と実行</p>
+<p>前節の実験と同様に、Chat Model と Embedding Model を用いた RAG の Chain を作成します。<br>プロンプトの文章には、前項の指示チューニングで用いたものと同じものを使用します。</p>
+<p>In[12]: from langchain_core.prompts import ChatPromptTemplate</p>
+<p># 任意の query からメッセージを構築する Prompt Template を作成<br>rag_prompt_text = (</p>
+<p>"あなたには今からクイズに答えてもらいます。<br>""問題を与えますので、その解答のみを簡潔に出力してください。<br>\n""また解答の参考になりうるテキストを与えます。<br>""解答を含まない場合もあるのでその場合は無視してください。<br>\n\n""---\n{context}\n---\n\n 問題: {query}"</p>
+<p>)<br>rag_prompt_template = ChatPromptTemplate.from_messages(</p>
+<p>[("user", rag_prompt_text)]</p>
+<p>)</p>
+<p>In[13]: from langchain_core.documents import Document</p>
+<p>from langchain_core.runnables import RunnableLambda</p>
+<p>def format_documents_func(documents: list[Document]) -> str:"""文書のリストを改行で連結した一つの文字列として返す"""return "\n\n".join(</p>
+<p>document.page_content for document in documents</p>
+<p>)</p>
+<p># 定義した関数の処理を行う Runnable を作成<br>format_documents = RunnableLambda(format_documents_func)</p>
+<p>13・3</p>
+<p>RAG向けにLLMを指示チューニングする</p>
+<p>163</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>In[14]: from langchain_core.prompt_values import ChatPromptValue</p>
+<p>def chat_model_resp_only_func(</p>
+<p>chat_prompt_value: ChatPromptValue,</p>
+<p>) -> str:</p>
+<p>"""chat_model に chat_prompt_value を入力し、出力からモデルの応答部分のみを文字列で返す"""chat_prompt = chat_model._to_chat_prompt(</p>
+<p>chat_prompt_value.messages</p>
+<p>)<br>chat_output_message = chat_model.invoke(chat_prompt_value)<br>response_text = chat_output_message.content[len(chat_prompt) :]<br>return response_text</p>
+<p># 定義した関数の処理を行う Runnable を作成<br>chat_model_resp_only = RunnableLambda(chat_model_resp_only_func)</p>
+<p>In[15]: from langchain_core.runnables import RunnablePassthrough</p>
+<p># RAG の一連の処理を行う Chain を作成<br>rag_chain = (</p>
+<p>{</p>
+<p>"context": retriever | format_documents,<br>"query": RunnablePassthrough(),</p>
+<p>}<br>| rag_prompt_template<br>| chat_model_resp_only</p>
+<p>)</p>
+<p>作成した Chain に対して質問を入力してみます。</p>
+<p>In[16]: # Chain を実行し、結果を確認</p>
+<p>rag_chain_output = rag_chain.invoke("四国地方で一番高い山は？ ")print(rag_chain_output)</p>
+<p>Out[16]: 石(cid:7745)山</p>
+<p>Chain の出力として、質問の正しい答えである「石(cid:7745)山」が得られました。</p>
+<p>本項の実験で Chat Model に用いた LLM は、前項の内容通りに AI 王データセットで指示チューニングされたものですが、指示チューニングではモデルの応答としてクイズの答えを端的に出力するように訓練されているため、RAG の Chain の出力として得られたモデルの応答も、質問に端的に答えるだけの形式になっています。</p>
+<p>164</p>
+<p>なお、本節における LLM の指示チューニングは、データセットの量や質、および訓練の規模</p>
+<p>の点で、十分と言えるものではありません。<br>そのため、実験環境によっては、検索された文書</p>
+<p>に含まれる他の山の名前が答えとして出力されたり、出力が文章の形式になったりするなど、想定通りの出力が得られない場合があります。<br>そのような場合は、根本的には Chat Modelや Embedding Model を改善することや、異なる種類の Retriever を使用するなどの工夫が必要になりますが、前処理レベルの変更として、例えば RecursiveCharacterTextSplitterによる文書の分割の設定を調整するだけでも、出力が改善する可能性があります。</p>
+<p>13.4 RAG の性能評価</p>
+<p>本章の最後のトピックとして、RAG の性能評価について説明します。<br>10.1 節でも述べたとおり、LLM を利用したアプリケーションを実際に運用するためには、アプリケーションの性能が運用に要求される水準を満たしているのか、どのモデルやシステムの構成を使うのが効果的であるかを評価できることが必要です。<br>特に RAG においては、LLM に何を用いるか、検索器による文書検索はどのように行うか、検索器で文埋め込みを利用する場合はどのモデル</p>
+<p>を使うか、文書の分割はどのような単位で行うかなど、性能改善の可能性を検討できる要素が多岐にわたります。<br>このため、どのような構成の RAG が解きたいタスクのデータセットに対して有用であるかを定量的に評価できることは、さまざまなパターンの RAG の構成を比較・検討していく上で重要です。</p>
+<p>前節および 9.5 節では、AI 王データセットを用いて、RAG のシステムが出力するクイズの答えと正解の一致率（正解率）を測ることでシステムの性能を評価しました。<br>AI 王データセットが題材とするクイズのように、質問に対する正解が短い語句として与えられる条件の下では、このような単純な評価方法もある程度有効です。<br>しかし、より一般的な RAG の設定では、システムの出力は多様な文章となるので、単純な文字列一致による性能評価は困難です。<br>したがって、RAG の性能評価も、第 10 章の LLM の性能評価と同様に、人手による評価や、LLM を評価器として用いる自動評価を伴うことが一般的です。</p>
+<p>また、RAG では LLM の他に検索器がシステムの構成要素として加わるため、RAG の評価の観点としては、単に LLM が出力する内容が適切かという点以外に、検索器によって検索される文書が適切か、検索された文書の内容を LLM が正しく参照できているかなどの観点を加えた、より多角的な評価ができることが望ましいです。</p>
+<p>本節では、RAG の性能を評価する上で重要となる観点について解説します。<br>また、それら</p>
+<p>の観点に基づいた RAG の評価を自動で行う手法についても紹介します。</p>
+<p>13・4</p>
+<p>RAGの性能評価</p>
+<p>165</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>Context Relevance</p>
+<p>質問</p>
+<p>検索器</p>
+<p>文書</p>
+<p>Answer <br>Relevance</p>
+<p>LLM</p>
+<p>回答</p>
+<p>Answer <br>Faithfulness</p>
+<p>図 13.4: RAG の性能評価の三つの観点</p>
+<p>13.4.1 RAG の性能評価の三つの観点</p>
+<p>Gao らによる RAG のサーベイ論文 [16] では、RAG の性能を評価する主な観点として、以</p>
+<p>下の三つが挙げられています。</p>
+<p>○Context Relevance（文脈の関連性）</p>
+<p>Context Relevance は、質問に対して検索器が検索した文書が、質問の内容に適合しているかを評価する観点です。<br>RAG において、検索された文書が質問の内容と適合していれば、質問との関連性が高い情報をもとに LLM が適切な回答を出力できる可能性が高くなります。<br>反対に、質問の内容と無関係の文書が検索されると、LLM の生成結果に悪影響を及ぼす可能性があるほか、LLM への入力トークン数が無駄に増えることで推論のコストが増大することにもつながります。</p>
+<p>○Answer Faithfulness（回答の忠実性）</p>
+<p>Answer Faithfulness は、LLM が生成した回答が、検索器が検索した文書の内容に基づいているかを評価する観点です。<br>RAG において、LLM が文書の内容を根拠に回答を生成できることは、LLM の幻覚を抑制するために重要です。<br>また、RAG のアプリケーションの機能として、検索器が検索した文書を LLM が生成した回答の根拠としてユーザに提示するような場合、LLM の回答と文書の内容には一貫性が求められます。</p>
+<p>○Answer Relevance（回答の関連性）</p>
+<p>Answer Relevance は、LLM が生成した回答が質問の内容に適合しているかを評価する観点です。<br>LLM の出力が質問への回答として不完全であったり、あるいは余計な情報が含まれていないかを評価します。</p>
+<p>図 13.4 に、RAG の性能評価の三つの観点の関係について示します。<br>三つの観点は、RAG における質問、文書、回答のそれぞれの間に関連性があるかを評価するものであると考えること</p>
+<p>166</p>
+<p>ができます。<br>また、Context Relevance は RAG における検索器の性能を、Answer Faithfulnessと Answer Relevance は RAG における LLM の性能を主に評価するものです。</p>
+<p>RAG の評価を実際に行うには、評価用データとして用意した質問の一つひとつに対して、検索器が検索した文書と LLM が出力した回答をチェックし、各評価の観点について採点を行います。<br>RAG が検索した文書と回答のチェックおよび採点は、10.1.1 節の LLM の性能評価と同様、人間が判断して行う人手評価と、評価指標や LLM を利用して行う自動評価、およびそれらのハイブリッドによる方法が考えられます。</p>
+<p>13・4</p>
+<p>RAGの性能評価</p>
+<p>13.4.2 RAG の性能評価を自動で行う手法</p>
+<p>RAG の性能評価において、質問に対して RAG が検索した文書と出力した回答のチェック、および各評価の観点の採点をすべて人間が行うことには大きなコストが伴います。<br>しかも、LLM 単体の評価と異なり、RAG にはさまざまな構成が考えられるので、どの構成の RAG が最も性能が良いかを試行錯誤するために毎回人手評価を行うのは現実的ではありません。<br>そこで、RAG の評価のプロセスの一部または全部を LLM やプロンプトを利用して自動的に行う手法が提案されています。<br>ここでは、RAG の自動評価の手法の一つである RAGAs を紹介します。</p>
+<p>RAGAs（Retrieval Augmented Generation Assessment）20[14] は、Exploding Gradients 社とカーディフ大学の研究者によって提案された、RAG の性能評価を自動的に行うフレームワークです。<br>RAGAs は、RAG の入出力である質問 q、文書 c、回答 a の組に対して、前述のContext Relevance、Answer Faithfulness、Answer Relevance の観点による評価を、LLM と文埋め込みモデルを用いた自動評価により行います21。</p>
+<p>例えば、RAGAs では Context Relevance の評価を以下の手順で行います。</p>
+<p>1. 文書 c を文単位に分割する2. LLM を用いて、c に含まれる各文が質問 q と関連しているかを判定する3.</p>
+<p>c に含まれる文のうち、質問 q と関連していると判定された文の割合を ContextRelevance のスコアとする</p>
+<p>Answer Faithfulness の評価は以下の手順で行います。</p>
+<p>1. LLM を用いて、回答 a の内容を、それぞれが単一の情報を含むような複数の文章に分</p>
+<p>割し、S(a) とする</p>
+<p>2. LLM を用いて、S(a) に含まれる各文章が文書 c の内容から導出可能であるかを判定</p>
+<p>する</p>
+<p>3. S(a) に含まれる文章のうち、文書 c の内容から導出可能と判定された文章の割合を</p>
+<p>20 https://github.com/explodinggradients/ragas21 RAGAs は執筆時現在においても継続的にバージョンアップが行われており、前述の三つの観点以外の観点による</p>
+<p>評価も追加で実装されています。<br>詳しくは RAGAs の公式ドキュメントを参照してください。</p>
+<p>167</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>Answer Faithfulness のスコアとする</p>
+<p>Answer Relevance の評価は以下の手順で行います。</p>
+<p>1. LLM を用いて、回答 a をもとに n 個の擬似質問 q1, · · · , qn を生成する2. 文埋め込みモデルを用いて、質問 q と擬似質問 q1, · · · , qn の文埋め込みを行い、質問</p>
+<p>q と各擬似質問 qi の類似度 sim(q, qi) を計算する</p>
+<p>3. n 個の擬似質問について計算された、質問 q との類似度 sim(q, qi) の平均値を Answer</p>
+<p>Relevance のスコアとする</p>
+<p>このように、RAGAs では LLM や文埋め込みモデルを用いて、各観点の評価（採点）を自動的に行います22。<br>評価の各段階で行われる LLM による推論には、ヒューリスティックにより設計されたプロンプトが用いられます。<br>例えば、Context Relevance の評価には、以下のプロンプト23が用いられています。</p>
+<p>「与えられた文書から、以下の質問に答えるために役立つ関連文を抽出してください。</p>
+<p>関連文が一つもない場合、または与えられた文書の内容からは質問に答えられないと</p>
+<p>考えられる場合は「情報不足」と出力してください。<br>関連文を抽出するときには、与</p>
+<p>えられた文書の文に変更を加えてはいけません。<br>」</p>
+<p>RAGAs は人手による評価を必要としない手法でありながら、RAGAs による評価結果と人手</p>
+<p>による評価結果には高い相関が見られることが RAGAs の論文 [14] で報告されています。</p>
+<p>RAG の自動評価の手法としては他にも、少量のラベル付きデータとして RAG の入出力データ（質問、文書、回答の組）に各評価の観点のスコアを人手で付与したデータを用いることで、より高精度に RAG の性能を評価する ARES（Automated RAG Evaluation System）24[39]などが提案されています。</p>
+<p>13.4.3 RAG の構成要素としての LLM の能力の評価</p>
+<p>ここまで、RAG の性能評価で重要な三つの観点と、それらの観点に基づく自動評価の手法について紹介しました。<br>Gao らの論文 [16] では、これまでに紹介した三つの観点に加えて、RAG の構成要素としての LLM に求められる能力（図 13.5）として以下の四つを挙げています。</p>
+<p>22 自動評価に用いる LLM と文埋め込みモデルとして、デフォルトでは OpenAI のモデルが使われますが、LangChain</p>
+<p>連携を経由して別のモデルを使うことも可能です。</p>
+<p>23 論文 [14] に記載されているプロンプトを筆者が翻訳したものです。<br>実際の RAGAs のプロンプトは英語のみが用意</p>
+<p>されており、アップデートとともに改良が加えられています。</p>
+<p>168</p>
+<p>24 https://github.com/stanford-futuredata/ARES</p>
+<p>(cid:47)(cid:80)(cid:74)(cid:84)(cid:70)(cid:1)(cid:51)(cid:80)(cid:67)(cid:86)(cid:84)(cid:85)(cid:79)(cid:70)(cid:84)(cid:84)(cid:38892)(cid:12438)2022年にノーベル文学賞を受賞したのは誰?</p>
+<p>(cid:47)(cid:70)(cid:72)(cid:66)(cid:85)(cid:74)(cid:87)(cid:70)(cid:1)(cid:51)(cid:70)(cid:75)(cid:70)(cid:68)(cid:85)(cid:74)(cid:80)(cid:79)(cid:38892)(cid:12438)2022年にノーベル文学賞を受賞したのは誰?</p>
+<p>文書（一部の文書はノイズ）</p>
+<p>文書（すべての文書がノイズ）</p>
+<p>フランスの作家(cid:1555)(cid:1596)(cid:1645)(cid:1644)(cid:1561)(cid:1628)(cid:1599)(cid:1645)(cid:124)</p>
+<p>2021年のノーベル文学賞は(cid:124)</p>
+<p>2021年のノーベル文学賞は(cid:124)</p>
+<p>2020年のノーベル文学賞は(cid:124)</p>
+<p>回答</p>
+<p>回答</p>
+<p>(cid:1555)(cid:1596)(cid:1645)(cid:1644)(cid:1561)(cid:1628)(cid:1599)(cid:1645)</p>
+<p>(cid:13137)(cid:29883)(cid:1498)(cid:1472)(cid:1521)(cid:1486)(cid:1542)</p>
+<p>(cid:42)(cid:79)(cid:71)(cid:80)(cid:83)(cid:78)(cid:66)(cid:85)(cid:74)(cid:80)(cid:79)(cid:1)(cid:42)(cid:79)(cid:85)(cid:70)(cid:72)(cid:83)(cid:66)(cid:85)(cid:74)(cid:80)(cid:79)(cid:38892)(cid:12438)ChatGPTのiOS版アプリとAPIのリリースはいつ?</p>
+<p>(cid:36)(cid:80)(cid:86)(cid:79)(cid:85)(cid:70)(cid:83)(cid:71)(cid:66)(cid:68)(cid:85)(cid:86)(cid:66)(cid:77)(cid:1)(cid:51)(cid:80)(cid:67)(cid:86)(cid:84)(cid:85)(cid:79)(cid:70)(cid:84)(cid:84)(cid:38892)(cid:12438)2004年にオリンピックを開催した都市はどこ?</p>
+<p>文書（答えが複数の文書に存在）</p>
+<p>文書（文書に誤情報が含まれる）</p>
+<p>2023年(cid:63158)(cid:20694)(cid:63154)(cid:63161)(cid:20220)、OpenAIは(cid:124)</p>
+<p>2004年の五輪は ×(cid:1596)(cid:1622)(cid:1645)(cid:1625)(cid:1645)(cid:1568)に(cid:124)</p>
+<p>その状況は変わり、(cid:63156)(cid:20694)(cid:63154)(cid:20220) に(cid:124)</p>
+<p>(cid:124)× (cid:1596)(cid:1622)(cid:1645)(cid:1625)(cid:1645)(cid:1568)が圧勝した。</p>
+<p>回答</p>
+<p>(cid:63158)(cid:20694)(cid:63154)(cid:63161)(cid:20220)(cid:1499)(cid:63156)(cid:20694)(cid:63154)(cid:20220)</p>
+<p>回答(cid:20035)(cid:20660)(cid:1505)(cid:17903)(cid:13652)(cid:1502)(cid:37872)(cid:1533)(cid:1471)(cid:1461)(cid:1533)(cid:1521)(cid:1484)</p>
+<p>図 13.5: RAG の構成要素としての LLM に求められる四つの能力（論文 [8] の図をもとに筆者作成）</p>
+<p>○Noise Robustness（ノイズへの頑健性）</p>
+<p>Noise Robustness は、検索器により検索された文書に、質問の回答に役立つ文書と、質問の回答に役立たないノイズとなるような文書の両方が含まれている場合に、LLM が回答に役立つ文書のみを参考にして回答を生成できる能力です。</p>
+<p>○Negative Rejection（回答不可能な質問の却下）</p>
+<p>Negative Rejection は、検索器により検索された文書の中に、質問の回答に役立つ文書が一つも含まれていない場合に、回答に必要な情報が不十分であるとして LLM が回答を出力しないことを選択できる能力です。<br>LLM が誤った情報を回答として出力しないために必要な能力です。</p>
+<p>○Information Integration（情報の統合）</p>
+<p>Information Integration は、検索器により検索された文書において、質問の回答に必要な情報が別々の文書に分かれて記述されている場合に、LLM が複数の文書の内容を統合して回答を生成できる能力です。<br>RAG に入力される質問が複雑である場合に重要な能力です。</p>
+<p>13・4</p>
+<p>RAGの性能評価</p>
+<p>169</p>
+<p>第13章</p>
+<p>R<br>A<br>G</p>
+<p>○Counterfactual Robustness（反事実への頑健性）</p>
+<p>Counterfactual Robustness は、RAG で扱う文書中に事実に反する情報が含まれていることが想定されている場合に、検索された文書に誤りが含まれていることを LLM が検知できる能力です。<br>ウェブから取得されたデータのような、正確であることが保証できない情報を用いた RAG で必要となる能力です。</p>
+<p>これら四つの能力は、RAG の構成要素として使われる LLM の能力を評価するベンチマークの RGB（Retrieval-Augmented Generation Benchmark）25の論文 [8] で提案されているものです。<br>RGB は、ニュース記事とそれに関する質問をもとに生成された評価用データセットを用いて LLM の四つの能力を評価するベンチマークです。<br>この論文では、ChatGPT などの既存のいくつかの LLM に対して評価を行い、既存の LLM は一定の Noise Robustness を備えているものの、それ以外の三つの能力については改善の余地が大きいことを報告しています。</p>
+<p>本節では、RAG の評価の観点と、評価に利用できるフレームワークについて紹介しました。<br>RAG の評価は歴史の浅い研究分野であるため、本書の執筆時点では未だ評価の方法が確立されているとは言えません。<br>しかし、LLM の幻覚などの課題が認識される中、RAG の重要性はより高まっており、RAG の評価に関する研究はこれから成熟していくことが期待されます。</p>
+<p>170</p>
+<p>25 https://github.com/chen700564/RGB</p>
+<p><br></p>
+</div>
+    <div id="custom-menu">
+        <ul>
+            <li onclick="highlightSelection()">Mark Text</li>
+            <li onclick="unmarkSelection()">Unmark Text</li>
+            <li onclick="exportMarkedText()">Export Marked Text</li>
+        </ul>
+    </div>
+    <script src="highlight.js"></script>
+</body>
+</html>
