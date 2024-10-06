@@ -20,6 +20,16 @@ function highlightSelection() {
             console.error("Error highlighting text:", error);
         }
     }
+
+    // Monitor touchend events for mobile devices
+    document.addEventListener('touchend', function(event) {
+        let selection = window.getSelection().toString();  // Check if there is any text selected
+        if (selection.length > 0) {
+            showCustomMenu(event, true);
+        } else {
+            closeCustomMenu();
+        }
+    });
     closeCustomMenu();  // Close the menu
 }
 
@@ -104,8 +114,10 @@ function loadHighlights() {
 }
 
 // Display custom right-click menu and save the selected range
-function showCustomMenu(event) {
-    event.preventDefault();  // Disable the default right-click menu
+function showCustomMenu(event, isTouch = false) {
+    if (!isTouch) {
+        event.preventDefault();  // Disable the default right-click menu
+    }
 
     let selection = window.getSelection();
     if (selection.rangeCount > 0) {
@@ -128,7 +140,7 @@ function closeCustomMenu() {
 document.addEventListener('contextmenu', function(event) {
     let selection = window.getSelection().toString();  // Check if there is any text selected
     if (selection.length > 0) {
-        showCustomMenu(event);
+        showCustomMenu(event, false);
     } else {
         closeCustomMenu();
     }
