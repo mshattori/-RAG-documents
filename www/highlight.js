@@ -8,6 +8,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Function to handle the highlighting process
 function highlightSelection() {
+    let selection = window.getSelection();
+    if (selection.rangeCount > 0) {
+        savedRange = selection.getRangeAt(0);  // Save the selected range
+    }
+
     if (savedRange) {
         // Create a new span element
         let span = document.createElement('span');
@@ -20,20 +25,15 @@ function highlightSelection() {
             console.error("Error highlighting text:", error);
         }
     }
-
-    // Monitor touchend events for mobile devices
-    document.addEventListener('touchend', function(event) {
-        let selection = window.getSelection().toString();  // Check if there is any text selected
-        if (selection.length > 0) {
-            showCustomMenu(event, true);
-        } else {
-            closeCustomMenu();
-        }
-    });
     closeCustomMenu();  // Close the menu
 }
 
 function unmarkSelection() {
+    let selection = window.getSelection();
+    if (selection.rangeCount > 0) {
+        savedRange = selection.getRangeAt(0);  // Save the selected range
+    }
+
     isSpan = node => node.nodeType === Node.ELEMENT_NODE && node.tagName.toLowerCase() === 'span';
     isHighlightSpan = node => isSpan(node) && node.classList.contains('highlight');
 
