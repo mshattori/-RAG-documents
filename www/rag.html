@@ -38,30 +38,6 @@
             background-color: #0056b3;
         }
 
-        /* カスタム右クリックメニューのスタイル */
-        #custom-menu {
-            display: none;
-            position: absolute;
-            background-color: white;
-            border: 1px solid #ccc;
-            box-shadow: 0px 2px 5px rgba(0, 0, 0, 0.2);
-            z-index: 1000;
-        }
-
-        #custom-menu ul {
-            list-style: none;
-            padding: 0;
-            margin: 0;
-        }
-
-        #custom-menu ul li {
-            padding: 5px;
-            cursor: pointer;
-        }
-
-        #custom-menu ul li:hover {
-            background-color: #eee;
-        }
     </style>
 </head>
 <body>
@@ -106,7 +82,7 @@
 <p>RAGとは</p>
 <p>作成したパイプラインを用いて、任意の質問に対してモデルの回答を生成する関数を定義</p>
 <p>し、簡単な質問に対して実行してみます。</p>
-<p>In[4]: def generate_answer(query_text: str) -> str:</p>
+<p>In[4]: def generate_answer(query_text: str) -&gt; str:</p>
 <p>"""質問に対してモデルが生成する回答を返す関数"""</p>
 <p># モデルに入力する会話データ<br>messages = [{"role": "user", "content": query_text}]</p>
 <p># モデルに会話データを入力し、出力会話データからモデルの回答部分を抽出<br>pipeline_output = text_generation_pipeline(messages)<br>output_messages = pipeline_output[0]["generated_text"]<br>response_text = output_messages[-1]["content"]</p>
@@ -255,11 +231,11 @@
 <p>)<br>print(llm_prompt_text)</p>
 <p>13・2</p>
 <p>基本的なRAGのシステムの実装</p>
-<p>Out[5]: <s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：</p>
+<p>Out[5]: &lt;s&gt;ユーザ：四国地方で一番高い山は？ &lt;/s&gt;&lt;s&gt;アシスタント：</p>
 <p>LLM コンポーネントへの入力は、LLM コンポーネントの invoke メソッドを呼び出すことにより行います。<br>LangChain における実行可能な各種コンポーネント（Runnable と呼ばれます）は invoke メソッドを持っており、このメソッドを呼び出すことでコンポーネントを実行することができます。<br>Runnable と invoke メソッドはこの後にも登場するので覚えておいてください。</p>
 <p>In[6]: # LLM への入力を実行し、結果を確認</p>
 <p>llm_output_message = llm.invoke(llm_prompt_text)<br>print(llm_output_message)</p>
-<p>Out[6]: <s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：日本の四国地方で最も高い山は、徳島県と高知県の県境に位置する剣山（つるぎさん、1,955m）である。<br>剣山は四国の最高峰であり、日本の百名山のひとつである。</p>
+<p>Out[6]: &lt;s&gt;ユーザ：四国地方で一番高い山は？ &lt;/s&gt;&lt;s&gt;アシスタント：日本の四国地方で最も高い山は、徳島県と高知県の県境に位置する剣山（つるぎさん、1,955m）である。<br>剣山は四国の最高峰であり、日本の百名山のひとつである。</p>
 <p>(cid:2)→</p>
 <p>(cid:2)→</p>
 <p>LLM コンポーネントの出力として、Swallow-7b-hf-oasst1-21k-ja のモデルの出力を得ることができました。</p>
@@ -278,14 +254,14 @@
 <p>In[8]: from langchain_core.messages import HumanMessage, SystemMessage</p>
 <p># Chat Model に入力する会話データchat_messages = [HumanMessage(content="四国地方で一番高い山は？ ")]</p>
 <p># Chat Model によるチャットテンプレート適用後の入力文字列を確認<br>chat_prompt = chat_model._to_chat_prompt(chat_messages)<br>print(chat_prompt)</p>
-<p>Out[8]: <s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：</p>
+<p>Out[8]: &lt;s&gt;ユーザ：四国地方で一番高い山は？ &lt;/s&gt;&lt;s&gt;アシスタント：</p>
 <p>想定通り、先ほどと同じチャットテンプレートが適用されていることがわかります。</p>
 <p>Chat Model コンポーネントも LLM コンポーネントと同様に Runnable であり、invoke メ</p>
 <p>ソッドでモデルへの入力を実行できます。</p>
 <p>In[9]: # Chat Model に会話データを入力し、出力を確認</p>
 <p>chat_output_message = chat_model.invoke(chat_messages)<br>pprint(chat_output_message)</p>
 <p>132</p>
-<p>Out[9]: AIMessage(content='<s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：</p>
+<p>Out[9]: AIMessage(content='&lt;s&gt;ユーザ：四国地方で一番高い山は？ &lt;/s&gt;&lt;s&gt;アシスタント：</p>
 <p>(cid:2)→</p>
 <p>(cid:2)→</p>
 <p>(cid:2)→</p>
@@ -336,7 +312,7 @@
 <p>In[12]: # Prompt Template と Chat Model を連結した Chain を作成</p>
 <p>chain = prompt_template | chat_model</p>
 <p># Chain を実行し、結果を確認chain_output = chain.invoke({"query": "四国地方で一番高い山は？ "})pprint(chain_output)</p>
-<p>Out[12]: AIMessage(content='<s>ユーザ：四国地方で一番高い山は？ </s><s>アシスタント：</p>
+<p>Out[12]: AIMessage(content='&lt;s&gt;ユーザ：四国地方で一番高い山は？ &lt;/s&gt;&lt;s&gt;アシスタント：</p>
 <p>(cid:2)→</p>
 <p>(cid:2)→</p>
 <p>(cid:2)→</p>
@@ -347,7 +323,7 @@
 <p>from langchain_core.runnables import RunnableLambda</p>
 <p>def chat_model_resp_only_func(</p>
 <p>chat_prompt_value: ChatPromptValue,</p>
-<p>) -> str:</p>
+<p>) -&gt; str:</p>
 <p>"""chat_model に chat_prompt_value を入力し、出力からモデルの応答部分のみを文字列で返す"""chat_prompt = chat_model._to_chat_prompt(</p>
 <p>chat_prompt_value.messages</p>
 <p>)<br>chat_output_message = chat_model.invoke(chat_prompt_value)<br>response_text = chat_output_message.content[len(chat_prompt) :]<br>return response_text</p>
@@ -568,7 +544,7 @@
 <p>図 13.3: RAG の Chain の構成</p>
 <p>RunnableLambda クラスを用いて作成します。</p>
 <p>In[28]: from langchain_core.documents import Document</p>
-<p>def format_documents_func(documents: list[Document]) -> str:"""文書のリストを改行で連結した一つの文字列として返す"""return "\n\n".join(</p>
+<p>def format_documents_func(documents: list[Document]) -&gt; str:"""文書のリストを改行で連結した一つの文字列として返す"""return "\n\n".join(</p>
 <p>document.page_content for document in documents</p>
 <p>)</p>
 <p># 定義した関数の処理を行う Runnable を作成<br>format_documents = RunnableLambda(format_documents_func)</p>
@@ -704,10 +680,10 @@
 <p>In[6]: from typing import Any</p>
 <p>def filter_example(</p>
 <p>example: dict[str, Any], max_passages: int = 3</p>
-<p>) -> bool:</p>
+<p>) -&gt; bool:</p>
 <p>"""上位 max_passages 件のパッセージに正例が含まれていない事例を除外"""if len(example["positive_passage_indices"]) == 0:</p>
 <p>return False</p>
-<p>if example["positive_passage_indices"][0] >= max_passages:</p>
+<p>if example["positive_passage_indices"][0] &gt;= max_passages:</p>
 <p>return False</p>
 <p>return True</p>
 <p>dataset = dataset.filter(filter_example)</p>
@@ -715,7 +691,7 @@
 <p>を行います。<br>プロンプトの文章として、9.5.2 節で用いたものを使用します。</p>
 <p>In[7]: def process_example(</p>
 <p>example: dict[str, Any], max_passages: int = 3</p>
-<p>) -> dict[str, Any]:</p>
+<p>) -&gt; dict[str, Any]:</p>
 <p>"""質問、パッセージ、正解の組からプロンプトを作成し、会話データに変換"""</p>
 <p># example から必要な情報を取得<br>question = example["question"]<br>answer = example["answers"][0]<br>passages = [p["text"] for p in example["passages"]]</p>
 <p>148</p>
@@ -826,7 +802,7 @@
 <p>from tqdm.notebook import tqdm<br>from transformers import PreTrainedModel</p>
 <p>def evaluate(</p>
 <p>model: PreTrainedModel, dataset: Dataset</p>
-<p>) -> tuple[list[str], list[str], float]:</p>
+<p>) -&gt; tuple[list[str], list[str], float]:</p>
 <p>"""データセットの各問題に対するモデルの出力を評価し、正解率を算出"""pred_answers = []gold_answers = []num_correct = 0</p>
 <p>for example in tqdm(dataset):</p>
 <p># プロンプトにチャットテンプレートを適用<br>model_inputs = tokenizer.apply_chat_template(</p>
@@ -1100,7 +1076,7 @@
 <p>)</p>
 <p>In[13]: from langchain_core.documents import Document</p>
 <p>from langchain_core.runnables import RunnableLambda</p>
-<p>def format_documents_func(documents: list[Document]) -> str:"""文書のリストを改行で連結した一つの文字列として返す"""return "\n\n".join(</p>
+<p>def format_documents_func(documents: list[Document]) -&gt; str:"""文書のリストを改行で連結した一つの文字列として返す"""return "\n\n".join(</p>
 <p>document.page_content for document in documents</p>
 <p>)</p>
 <p># 定義した関数の処理を行う Runnable を作成<br>format_documents = RunnableLambda(format_documents_func)</p>
@@ -1112,7 +1088,7 @@
 <p>In[14]: from langchain_core.prompt_values import ChatPromptValue</p>
 <p>def chat_model_resp_only_func(</p>
 <p>chat_prompt_value: ChatPromptValue,</p>
-<p>) -> str:</p>
+<p>) -&gt; str:</p>
 <p>"""chat_model に chat_prompt_value を入力し、出力からモデルの応答部分のみを文字列で返す"""chat_prompt = chat_model._to_chat_prompt(</p>
 <p>chat_prompt_value.messages</p>
 <p>)<br>chat_output_message = chat_model.invoke(chat_prompt_value)<br>response_text = chat_output_message.content[len(chat_prompt) :]<br>return response_text</p>
@@ -1251,13 +1227,6 @@
 <p>25 https://github.com/chen700564/RGB</p>
 <p><br></p>
 </div>
-    <div id="custom-menu">
-        <ul>
-            <li onclick="highlightSelection()">Mark Text</li>
-            <li onclick="unmarkSelection()">Unmark Text</li>
-            <li onclick="exportMarkedText()">Export Marked Text</li>
-        </ul>
-    </div>
     <div class="fixed-buttons">
         <button onclick="highlightSelection()">Mark Text</button>
         <button onclick="unmarkSelection()">Unmark Text</button>

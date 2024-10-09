@@ -1,46 +1,51 @@
-let savedRange = null; // Variable to save the selected range
 const storageKey = `highlights_${window.location.pathname}`; // Namespace by document path
 
-// Load saved highlights on document load
+const scrollPositionKey = `scrollPosition_${window.location.pathname}`;
+
+// Load saved highlights and scroll position on document load
 document.addEventListener('DOMContentLoaded', () => {
     loadHighlights();
+    const savedScrollPosition = localStorage.getItem(scrollPositionKey);
+    if (savedScrollPosition) {
+        window.scrollTo(0, parseInt(savedScrollPosition, 10));
+    }
+});
+
+// Save scroll position when the page is hidden
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+        localStorage.setItem(scrollPositionKey, window.scrollY);
+    }
 });
 
 // Function to handle the highlighting process
 function highlightSelection() {
     let selection = window.getSelection();
     if (selection.rangeCount > 0) {
-        savedRange = selection.getRangeAt(0);  // Save the selected range
-    }
-
-    if (savedRange) {
+        range = selection.getRangeAt(0);  // Save the selected range
         // Create a new span element
         let span = document.createElement('span');
         span.className = 'highlight';
         
         try {
-            savedRange.surroundContents(span);
+            range.surroundContents(span);
             saveHighlights();
         } catch (error) {
             console.error("Error highlighting text:", error);
         }
     }
-    closeCustomMenu();  // Close the menu
 }
 
 function unmarkSelection() {
-    let selection = window.getSelection();
-    if (selection.rangeCount > 0) {
-        savedRange = selection.getRangeAt(0);  // Save the selected range
-    }
-
     isSpan = node => node.nodeType === Node.ELEMENT_NODE && node.tagName.toLowerCase() === 'span';
     isHighlightSpan = node => isSpan(node) && node.classList.contains('highlight');
 
-    if (savedRange) {
-        let parent = savedRange.commonAncestorContainer;
+    let selection = window.getSelection();
+    if (selection.rangeCount > 0) {
+        range = selection.getRangeAt(0);  // Save the selected range
+        let parent = range.commonAncestorContainer;
         if (!isHighlightSpan(parent)) {
-            parent = savedRange.commonAncestorContainer.parentElement;
+            parent = range.commonAncestorContainer.parentElement;
             if (!isHighlightSpan(parent)) {
                 return;
             }
@@ -88,7 +93,6 @@ function unmarkSelection() {
 
         saveHighlights();
     }
-    closeCustomMenu();  // Close the menu
 }
 
 // Save highlights to local storage
@@ -112,46 +116,6 @@ function loadHighlights() {
     });
     saveHighlights();
 }
-
-// Display custom right-click menu and save the selected range
-function showCustomMenu(event, isTouch = false) {
-    if (!isTouch) {
-        event.preventDefault();  // Disable the default right-click menu
-    }
-
-    let selection = window.getSelection();
-    if (selection.rangeCount > 0) {
-        savedRange = selection.getRangeAt(0);  // Save the selected range
-    }
-
-    let menu = document.getElementById('custom-menu');
-    menu.style.display = 'block';
-    menu.style.left = `${event.pageX}px`;
-    menu.style.top = `${event.pageY}px`;
-}
-
-// Close the custom right-click menu
-function closeCustomMenu() {
-    let menu = document.getElementById('custom-menu');
-    menu.style.display = 'none';
-}
-
-// Monitor right-click (contextmenu) events
-document.addEventListener('contextmenu', function(event) {
-    let selection = window.getSelection().toString();  // Check if there is any text selected
-    if (selection.length > 0) {
-        showCustomMenu(event, false);
-    } else {
-        closeCustomMenu();
-    }
-});
-
-// Close the menu when clicking outside of the custom menu
-document.addEventListener('click', function(event) {
-    if (event.target.closest('#custom-menu') === null) {
-        closeCustomMenu();
-    }
-});
 
 function exportMarkedText() {
     let highlights = document.querySelectorAll('.highlight');
